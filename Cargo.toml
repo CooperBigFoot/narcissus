@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/nicolaslazaro/narcissus"
+
+[package]
+name = "narcissus"
+version = "0.1.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "High-performance CLI for shape-based hydrological basin clustering and classification"
+
+[[bin]]
+name = "narcissus"
+path = "src/main.rs"
+
+[dependencies]
+narcissus-cluster = { path = "crates/narcissus-cluster" }
+narcissus-dtw = { path = "crates/narcissus-dtw" }
+narcissus-rf = { path = "crates/narcissus-rf" }
+narcissus-io = { path = "crates/narcissus-io" }
+
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"

@@ -1,0 +1,11 @@
+[package]
+name = "narcissus-rf"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Random Forest classification: train, evaluate, predict"
+
+[dependencies]
+thiserror = "2"
+tracing = "0.1"
