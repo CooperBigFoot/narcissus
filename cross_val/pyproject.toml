@@ -7,4 +7,5 @@ dependencies = [
     "tslearn>=0.8",
     "dtaidistance>=2.4",
     "numpy>=2",
+    "scikit-learn>=1.4",
 ]

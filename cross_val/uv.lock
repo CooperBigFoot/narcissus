@@ -9,6 +9,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "dtaidistance" },
     { name = "numpy" },
+    { name = "scikit-learn" },
     { name = "tslearn" },
 ]
 
@@ -16,6 +17,7 @@ dependencies = [
 requires-dist = [
     { name = "dtaidistance", specifier = ">=2.4" },
     { name = "numpy", specifier = ">=2" },
+    { name = "scikit-learn", specifier = ">=1.4" },
     { name = "tslearn", specifier = ">=0.8" },
 ]
 
