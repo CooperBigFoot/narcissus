@@ -21,10 +21,10 @@ High-level capabilities that Narcissus must deliver. Status: `pending` | `in-pro
 | 5 | **Random Forest classification** | Train a classifier that maps static basin attributes → cluster labels. Must support probability output (top-k predictions). | `pending` | Evaluate existing Rust crates (`smartcore`, `linfa-ensemble`) vs. hand-rolling. Decision deferred until clustering is done. |
 | 6 | **Model evaluation** | Cross-validated accuracy, confusion matrix, feature importance ranking. | `pending` | Depends on #5. Stratified k-fold CV needed. |
 | 7 | **Prediction** | Load a trained model, predict cluster membership with probabilities for new basins. | `pending` | Depends on #5. Top-k ranked output. |
-| 8 | **Data ingestion** | Read time series and tabular attribute data from disk. Format TBD (CSV, NPY, Parquet, or custom). | `pending` | Keep format-agnostic internally — concrete readers are a separate concern. |
-| 9 | **Validation** | Validate inputs at the boundary: shape, missing values, ID consistency, feature schema matching. | `pending` | Parse-don't-validate philosophy per CLAUDE.md. |
-| 10 | **Result persistence** | Write cluster assignments, centroids, model artifacts, and evaluation metrics to disk. | `pending` | JSON for structured output. Tabular formats for large results. |
-| 11 | **CLI** | Subcommand-based interface (`optimize`, `cluster`, `evaluate`, `predict`). JSON to stdout, diagnostics to stderr. | `pending` | `clap` derive API. |
+| 8 | **Data ingestion** | Read time series and tabular attribute data from disk. Format TBD (CSV, NPY, Parquet, or custom). | `done` | CSV reader (`TimeSeriesReader`) in narcissus-io. Header-based format: `basin_id,t0,t1,...,tn`. Full validation pipeline (6 error variants). |
+| 9 | **Validation** | Validate inputs at the boundary: shape, missing values, ID consistency, feature schema matching. | `done` | Parse-don't-validate newtypes (`BasinId`, `ExperimentName`). Row length, duplicate ID, non-finite value, and empty dataset checks. |
+| 10 | **Result persistence** | Write cluster assignments, centroids, model artifacts, and evaluation metrics to disk. | `done` | JSON writer (`ResultWriter`) in narcissus-io. Shadow-struct serialization — no serde on cluster types. `{experiment}_cluster.json` and `{experiment}_optimize.json`. |
+| 11 | **CLI** | Subcommand-based interface (`optimize`, `cluster`, `evaluate`, `predict`). JSON to stdout, diagnostics to stderr. | `done` | `optimize` and `cluster` fully wired. `evaluate` and `predict` remain stubs (depend on #5). `TuningArgs` flattened into both commands. Rayon `--threads` flag. |
 | 12 | **Model serialization** | Save/load trained RF models in a Rust-native format. | `pending` | Depends on #5 — format determined by RF implementation choice. |
 
 ### Open Design Questions
@@ -32,9 +32,9 @@ High-level capabilities that Narcissus must deliver. Status: `pending` | `in-pro
 | Question | Options | Status |
 |---|---|---|
 | RF implementation | Hand-roll / `smartcore` / `linfa-ensemble` / hybrid | **Deferred** — evaluate after clustering works |
-| Input time series format | CSV / NPY / Parquet / custom binary | **Open** |
-| Input attributes format | CSV / Parquet | **Open** |
-| Centroid output format | Same as input / JSON / CSV | **Open** |
+| Input time series format | CSV / NPY / Parquet / custom binary | **Resolved** — CSV (`basin_id,t0,...,tn`) |
+| Input attributes format | CSV / Parquet | **Open** — depends on RF implementation |
+| Centroid output format | Same as input / JSON / CSV | **Resolved** — JSON (embedded in cluster result artifact) |
 | Model binary format | Custom / bincode / messagepack | **Open** — depends on RF choice |
 
 ---
@@ -61,6 +61,8 @@ narcissus (bin)
 │   └── narcissus-dtw
 ├── narcissus-rf
 └── narcissus-io
+    ├── narcissus-dtw
+    └── narcissus-cluster
 ```
 
 - **narcissus-dtw** — Pure math, zero I/O. DTW distance computation and DBA.
