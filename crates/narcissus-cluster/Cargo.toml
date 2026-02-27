@@ -11,3 +11,6 @@ narcissus-dtw = { path = "../narcissus-dtw" }
 
 thiserror = "2"
 tracing = "0.1"
+rayon = "1"
+rand = { version = "0.8", features = ["small_rng"] }
+rand_chacha = "0.3"
