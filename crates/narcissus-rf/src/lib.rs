@@ -7,6 +7,7 @@
 mod config;
 mod confusion;
 mod error;
+mod eval;
 mod forest;
 mod importance;
 mod node;
@@ -20,6 +21,7 @@ mod tree;
 pub use config::{MaxFeatures, OobMode, RandomForestConfig};
 pub use confusion::{ClassMetrics, ConfusionMatrix};
 pub use error::RfError;
+pub use eval::{CrossValidation, CrossValidationResult};
 pub use forest::RandomForest;
 pub use importance::RankedFeature;
 pub use node::{FeatureIndex, Impurity, Node, NodeIndex};
