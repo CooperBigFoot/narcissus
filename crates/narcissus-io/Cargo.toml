@@ -7,7 +7,16 @@ repository.workspace = true
 description = "File I/O, validation, and serialization"
 
 [dependencies]
+csv = "1"
+narcissus-cluster = { path = "../narcissus-cluster" }
+narcissus-dtw = { path = "../narcissus-dtw" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+narcissus-cluster = { path = "../narcissus-cluster" }
+narcissus-dtw = { path = "../narcissus-dtw" }
 serde_json = "1"
