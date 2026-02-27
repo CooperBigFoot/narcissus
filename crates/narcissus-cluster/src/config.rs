@@ -1,6 +1,23 @@
-use narcissus_dtw::BandConstraint;
+//! Configuration builders for K-means and elbow-method cluster count optimization.
+
+use narcissus_dtw::{BandConstraint, TimeSeries};
+
+use crate::error::ClusterError;
+use crate::result::{KMeansResult, OptimizeResult};
 
 /// Configuration for K-means clustering.
+///
+/// Construct via [`KMeansConfig::new`], then chain `with_*` methods to override defaults.
+///
+/// # Defaults
+///
+/// | Parameter      | Default |
+/// |----------------|---------|
+/// | `n_init`       | 10      |
+/// | `max_iter`     | 75      |
+/// | `tol`          | 1e-4    |
+/// | `seed`         | 42      |
+/// | `dba_max_iter` | 10      |
 #[derive(Debug, Clone)]
 pub struct KMeansConfig {
     pub(crate) k: usize,
@@ -12,7 +29,140 @@ pub struct KMeansConfig {
     pub(crate) dba_max_iter: usize,
 }
 
+impl KMeansConfig {
+    /// Create a new K-means configuration with the given cluster count and band constraint.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | [`ClusterError::InvalidK`] | `k` is zero |
+    pub fn new(k: usize, constraint: BandConstraint) -> Result<Self, ClusterError> {
+        if k == 0 {
+            return Err(ClusterError::InvalidK { k });
+        }
+        Ok(Self {
+            k,
+            constraint,
+            n_init: 10,
+            max_iter: 75,
+            tol: 1e-4,
+            seed: 42,
+            dba_max_iter: 10,
+        })
+    }
+
+    /// Set the number of independent restarts. Higher values reduce the risk of
+    /// converging to a poor local minimum.
+    #[must_use]
+    pub fn with_n_init(mut self, n_init: usize) -> Self {
+        self.n_init = n_init;
+        self
+    }
+
+    /// Set the maximum number of EM iterations per restart.
+    #[must_use]
+    pub fn with_max_iter(mut self, max_iter: usize) -> Self {
+        self.max_iter = max_iter;
+        self
+    }
+
+    /// Set the convergence tolerance. Iteration stops when inertia improvement
+    /// falls below this threshold.
+    #[must_use]
+    pub fn with_tol(mut self, tol: f64) -> Self {
+        self.tol = tol;
+        self
+    }
+
+    /// Set the random seed used for k-means++ initialization and restart shuffling.
+    #[must_use]
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Set the maximum number of DBA iterations used when computing centroids.
+    #[must_use]
+    pub fn with_dba_max_iter(mut self, dba_max_iter: usize) -> Self {
+        self.dba_max_iter = dba_max_iter;
+        self
+    }
+
+    /// Return the number of clusters.
+    #[must_use]
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// Return the band constraint used for DTW distance computation.
+    #[must_use]
+    pub fn constraint(&self) -> BandConstraint {
+        self.constraint
+    }
+
+    /// Return the number of independent restarts.
+    #[must_use]
+    pub fn n_init(&self) -> usize {
+        self.n_init
+    }
+
+    /// Return the maximum number of EM iterations per restart.
+    #[must_use]
+    pub fn max_iter(&self) -> usize {
+        self.max_iter
+    }
+
+    /// Return the convergence tolerance.
+    #[must_use]
+    pub fn tol(&self) -> f64 {
+        self.tol
+    }
+
+    /// Return the random seed.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Return the maximum number of DBA iterations used when computing centroids.
+    #[must_use]
+    pub fn dba_max_iter(&self) -> usize {
+        self.dba_max_iter
+    }
+
+    /// Cluster `series` using this configuration.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | [`ClusterError::TooFewSeries`] | `series.len() < k` |
+    /// | [`ClusterError::EmptyCluster`] | A cluster becomes empty and cannot be rescued |
+    /// | [`ClusterError::Dba`] | A DBA centroid update fails |
+    pub fn fit(&self, series: &[TimeSeries]) -> Result<KMeansResult, ClusterError> {
+        let n = series.len();
+        if n < self.k {
+            return Err(ClusterError::TooFewSeries { n_series: n, k: self.k });
+        }
+        crate::kmeans::multi_restart(series, self)
+    }
+}
+
 /// Configuration for elbow-method cluster count optimization.
+///
+/// Runs K-means for each k in `[min_k, max_k]` and selects the k at the
+/// elbow of the inertia curve using maximum second-derivative detection.
+///
+/// # Defaults
+///
+/// | Parameter      | Default |
+/// |----------------|---------|
+/// | `n_init`       | 10      |
+/// | `max_iter`     | 75      |
+/// | `tol`          | 1e-4    |
+/// | `seed`         | 42      |
+/// | `dba_max_iter` | 10      |
 #[derive(Debug, Clone)]
 pub struct OptimizeConfig {
     pub(crate) min_k: usize,
@@ -23,4 +173,203 @@ pub struct OptimizeConfig {
     pub(crate) tol: f64,
     pub(crate) seed: u64,
     pub(crate) dba_max_iter: usize,
+}
+
+impl OptimizeConfig {
+    /// Create a new optimization configuration for the cluster range `[min_k, max_k]`.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | [`ClusterError::InvalidK`] | `min_k` is zero |
+    /// | [`ClusterError::InvalidKRange`] | `min_k > max_k` |
+    pub fn new(
+        min_k: usize,
+        max_k: usize,
+        constraint: BandConstraint,
+    ) -> Result<Self, ClusterError> {
+        if min_k == 0 {
+            return Err(ClusterError::InvalidK { k: min_k });
+        }
+        if min_k > max_k {
+            return Err(ClusterError::InvalidKRange { min_k, max_k });
+        }
+        Ok(Self {
+            min_k,
+            max_k,
+            constraint,
+            n_init: 10,
+            max_iter: 75,
+            tol: 1e-4,
+            seed: 42,
+            dba_max_iter: 10,
+        })
+    }
+
+    /// Set the number of independent restarts per k value.
+    #[must_use]
+    pub fn with_n_init(mut self, n_init: usize) -> Self {
+        self.n_init = n_init;
+        self
+    }
+
+    /// Set the maximum number of EM iterations per restart.
+    #[must_use]
+    pub fn with_max_iter(mut self, max_iter: usize) -> Self {
+        self.max_iter = max_iter;
+        self
+    }
+
+    /// Set the convergence tolerance.
+    #[must_use]
+    pub fn with_tol(mut self, tol: f64) -> Self {
+        self.tol = tol;
+        self
+    }
+
+    /// Set the random seed.
+    #[must_use]
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Set the maximum number of DBA iterations used when computing centroids.
+    #[must_use]
+    pub fn with_dba_max_iter(mut self, dba_max_iter: usize) -> Self {
+        self.dba_max_iter = dba_max_iter;
+        self
+    }
+
+    /// Return the minimum cluster count (inclusive).
+    #[must_use]
+    pub fn min_k(&self) -> usize {
+        self.min_k
+    }
+
+    /// Return the maximum cluster count (inclusive).
+    #[must_use]
+    pub fn max_k(&self) -> usize {
+        self.max_k
+    }
+
+    /// Return the band constraint used for DTW distance computation.
+    #[must_use]
+    pub fn constraint(&self) -> BandConstraint {
+        self.constraint
+    }
+
+    /// Return the number of independent restarts per k value.
+    #[must_use]
+    pub fn n_init(&self) -> usize {
+        self.n_init
+    }
+
+    /// Return the maximum number of EM iterations per restart.
+    #[must_use]
+    pub fn max_iter(&self) -> usize {
+        self.max_iter
+    }
+
+    /// Return the convergence tolerance.
+    #[must_use]
+    pub fn tol(&self) -> f64 {
+        self.tol
+    }
+
+    /// Return the random seed.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Return the maximum number of DBA iterations used when computing centroids.
+    #[must_use]
+    pub fn dba_max_iter(&self) -> usize {
+        self.dba_max_iter
+    }
+
+    /// Run K-means for each k in `[min_k, max_k]` and return the full inertia curve.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | [`ClusterError::TooFewSeries`] | `series.len() < max_k` |
+    /// | [`ClusterError::EmptyCluster`] | A cluster becomes empty and cannot be rescued |
+    /// | [`ClusterError::Dba`] | A DBA centroid update fails |
+    pub fn fit(&self, series: &[TimeSeries]) -> Result<OptimizeResult, ClusterError> {
+        let n = series.len();
+        if n < self.max_k {
+            return Err(ClusterError::TooFewSeries { n_series: n, k: self.max_k });
+        }
+        crate::kmeans::optimize(series, self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use narcissus_dtw::BandConstraint;
+
+    use super::{KMeansConfig, OptimizeConfig};
+    use crate::error::ClusterError;
+
+    #[test]
+    fn new_valid_k() {
+        let cfg = KMeansConfig::new(3, BandConstraint::Unconstrained);
+        assert!(cfg.is_ok());
+        assert_eq!(cfg.unwrap().k(), 3);
+    }
+
+    #[test]
+    fn new_k_zero() {
+        let result = KMeansConfig::new(0, BandConstraint::Unconstrained);
+        assert!(matches!(result, Err(ClusterError::InvalidK { k: 0 })));
+    }
+
+    #[test]
+    fn builder_chaining() {
+        let cfg = KMeansConfig::new(3, BandConstraint::Unconstrained)
+            .unwrap()
+            .with_n_init(5)
+            .with_seed(99);
+        assert_eq!(cfg.n_init(), 5);
+        assert_eq!(cfg.seed(), 99);
+        assert_eq!(cfg.k(), 3);
+    }
+
+    #[test]
+    fn optimize_valid() {
+        let result = OptimizeConfig::new(2, 5, BandConstraint::Unconstrained);
+        assert!(result.is_ok());
+        let cfg = result.unwrap();
+        assert_eq!(cfg.min_k(), 2);
+        assert_eq!(cfg.max_k(), 5);
+    }
+
+    #[test]
+    fn optimize_invalid_range() {
+        let result = OptimizeConfig::new(5, 2, BandConstraint::Unconstrained);
+        assert!(matches!(
+            result,
+            Err(ClusterError::InvalidKRange { min_k: 5, max_k: 2 })
+        ));
+    }
+
+    #[test]
+    fn optimize_min_k_zero() {
+        let result = OptimizeConfig::new(0, 5, BandConstraint::Unconstrained);
+        assert!(matches!(result, Err(ClusterError::InvalidK { k: 0 })));
+    }
+
+    #[test]
+    fn defaults_are_correct() {
+        let cfg = KMeansConfig::new(1, BandConstraint::Unconstrained).unwrap();
+        assert_eq!(cfg.n_init(), 10);
+        assert_eq!(cfg.max_iter(), 75);
+        assert!((cfg.tol() - 1e-4).abs() < f64::EPSILON);
+        assert_eq!(cfg.seed(), 42);
+        assert_eq!(cfg.dba_max_iter(), 10);
+    }
 }
