@@ -131,6 +131,134 @@ impl ResultWriter {
         info!(path = %path.display(), "optimize result written");
         Ok(())
     }
+
+    /// Write evaluation results to `{experiment}_evaluate.json`.
+    ///
+    /// Uses shadow structs to accept primitives — the writer has no
+    /// dependency on `narcissus-rf`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::WriteFile`] if the file cannot be written.
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(skip_all)]
+    pub fn write_evaluation(
+        &self,
+        cv_accuracy_mean: f64,
+        cv_accuracy_std: f64,
+        fold_accuracies: &[f64],
+        oob_accuracy: Option<f64>,
+        feature_names: &[String],
+        feature_importances: &[f64],
+        feature_ranks: &[usize],
+        confusion_matrix: &[Vec<usize>],
+        n_classes: usize,
+        class_metrics: &[(f64, f64, f64, usize)], // (precision, recall, f1, support)
+    ) -> Result<(), IoError> {
+        let path = self
+            .output_dir
+            .join(format!("{}_evaluate.json", self.experiment.as_str()));
+
+        let features: Vec<FeatureEntry> = feature_names
+            .iter()
+            .zip(feature_importances.iter())
+            .zip(feature_ranks.iter())
+            .map(|((name, &importance), &rank)| FeatureEntry {
+                name: name.as_str(),
+                importance,
+                rank,
+            })
+            .collect();
+
+        let classes: Vec<ClassEntry> = class_metrics
+            .iter()
+            .enumerate()
+            .map(|(i, &(precision, recall, f1, support))| ClassEntry {
+                class: i,
+                precision,
+                recall,
+                f1,
+                support,
+            })
+            .collect();
+
+        let artifact = EvaluateArtifact {
+            experiment: self.experiment.as_str(),
+            cv_accuracy_mean,
+            cv_accuracy_std,
+            fold_accuracies,
+            oob_accuracy,
+            feature_importances: features,
+            confusion_matrix,
+            n_classes,
+            class_metrics: classes,
+        };
+
+        let json = serde_json::to_string_pretty(&artifact).expect("serialization cannot fail");
+        fs::write(&path, &json).map_err(|e| IoError::WriteFile {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        info!(path = %path.display(), "evaluation result written");
+        Ok(())
+    }
+
+    /// Write predictions to `{experiment}_predict.json`.
+    ///
+    /// Each entry is a `(basin_id, Vec<(class, probability)>)` pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IoError::WriteFile`] if the file cannot be written.
+    #[instrument(skip_all)]
+    pub fn write_predictions(
+        &self,
+        predictions: &[(String, Vec<(usize, f64)>)],
+    ) -> Result<(), IoError> {
+        let path = self
+            .output_dir
+            .join(format!("{}_predict.json", self.experiment.as_str()));
+
+        let entries: Vec<PredictionEntry> = predictions
+            .iter()
+            .map(|(basin_id, top_k)| {
+                let classes: Vec<PredictionClass> = top_k
+                    .iter()
+                    .map(|&(class, probability)| PredictionClass { class, probability })
+                    .collect();
+                PredictionEntry {
+                    basin_id: basin_id.as_str(),
+                    predicted_class: top_k.first().map(|&(c, _)| c).unwrap_or(0),
+                    top_k: classes,
+                }
+            })
+            .collect();
+
+        let artifact = PredictArtifact {
+            experiment: self.experiment.as_str(),
+            n_basins: predictions.len(),
+            predictions: entries,
+        };
+
+        let json = serde_json::to_string_pretty(&artifact).expect("serialization cannot fail");
+        fs::write(&path, &json).map_err(|e| IoError::WriteFile {
+            path: path.clone(),
+            source: e,
+        })?;
+
+        info!(path = %path.display(), "predictions written");
+        Ok(())
+    }
+
+    /// Return the path where the model binary should be saved.
+    ///
+    /// Does not write anything — just computes `{output_dir}/{experiment}_model.bin`.
+    #[must_use]
+    pub fn model_path(&self) -> PathBuf {
+        self.output_dir
+            .join(format!("{}_model.bin", self.experiment.as_str()))
+    }
 }
 
 // --- Shadow structs for JSON serialization ---
@@ -160,6 +288,55 @@ struct OptimizeArtifact<'a> {
 struct KResultEntry {
     k: usize,
     inertia: f64,
+}
+
+#[derive(Serialize)]
+struct EvaluateArtifact<'a> {
+    experiment: &'a str,
+    cv_accuracy_mean: f64,
+    cv_accuracy_std: f64,
+    fold_accuracies: &'a [f64],
+    oob_accuracy: Option<f64>,
+    feature_importances: Vec<FeatureEntry<'a>>,
+    confusion_matrix: &'a [Vec<usize>],
+    n_classes: usize,
+    class_metrics: Vec<ClassEntry>,
+}
+
+#[derive(Serialize)]
+struct FeatureEntry<'a> {
+    name: &'a str,
+    importance: f64,
+    rank: usize,
+}
+
+#[derive(Serialize)]
+struct ClassEntry {
+    class: usize,
+    precision: f64,
+    recall: f64,
+    f1: f64,
+    support: usize,
+}
+
+#[derive(Serialize)]
+struct PredictArtifact<'a> {
+    experiment: &'a str,
+    n_basins: usize,
+    predictions: Vec<PredictionEntry<'a>>,
+}
+
+#[derive(Serialize)]
+struct PredictionEntry<'a> {
+    basin_id: &'a str,
+    predicted_class: usize,
+    top_k: Vec<PredictionClass>,
+}
+
+#[derive(Serialize)]
+struct PredictionClass {
+    class: usize,
+    probability: f64,
 }
 
 #[cfg(test)]
