@@ -14,8 +14,8 @@ High-level capabilities that Narcissus must deliver. Status: `pending` | `in-pro
 
 | # | Component | Description | Status | Notes |
 |---|---|---|---|---|
-| 1 | **DTW distance** | Dynamic Time Warping with configurable warping window (Sakoe-Chiba). The core distance metric. | `pending` | Hand-rolled. Hot path — optimize for cache locality and parallelism. |
-| 2 | **Barycenter averaging** | Compute a representative centroid for a group of time series under DTW alignment (DBA algorithm). | `pending` | Hand-rolled. |
+| 1 | **DTW distance** | Dynamic Time Warping with configurable warping window (Sakoe-Chiba). The core distance metric. | `in-progress` | Hand-rolled. Sakoe-Chiba band constraint (radius=2 weeks for 52-week series). Rolling-buffer fast path (112 bytes for n=52, r=2). Rayon-parallelized pairwise computation. |
+| 2 | **Barycenter averaging** | Compute a representative centroid for a group of time series under DTW alignment (DBA algorithm). | `in-progress` | Hand-rolled. DBA algorithm (Petitjean et al. 2011). Iterative warping-path alignment to update centroid. Configurable convergence tolerance and max iterations. |
 | 3 | **K-means clustering** | Cluster time series into k groups using DTW as the distance metric. Includes smart initialization (k-means++) and multi-restart. | `pending` | Hand-rolled. Depends on #1 and #2. |
 | 4 | **Cluster count selection** | Run clustering across a range of k values and report fit quality (inertia) so the user or LLM can pick the best k (elbow method). | `pending` | Thin wrapper over #3. |
 | 5 | **Random Forest classification** | Train a classifier that maps static basin attributes → cluster labels. Must support probability output (top-k predictions). | `pending` | Evaluate existing Rust crates (`smartcore`, `linfa-ensemble`) vs. hand-rolling. Decision deferred until clustering is done. |
