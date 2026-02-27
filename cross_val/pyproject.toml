@@ -1,0 +1,10 @@
+[project]
+name = "cross-val"
+version = "0.1.0"
+description = "Cross-validation of narcissus Rust crates against Python reference implementations"
+requires-python = ">=3.13"
+dependencies = [
+    "tslearn>=0.8",
+    "dtaidistance>=2.4",
+    "numpy>=2",
+]
