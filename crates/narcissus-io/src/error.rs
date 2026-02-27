@@ -97,4 +97,18 @@ pub enum IoError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+
+    /// Returned when the attribute CSV has only a basin_id column and no feature columns.
+    #[error("no feature columns in attribute file {path}")]
+    NoFeatureColumns {
+        /// Path to the attribute CSV file.
+        path: PathBuf,
+    },
+
+    /// Returned when a clustered basin is not found in the attribute dataset.
+    #[error("missing attributes for basin \"{basin_id}\"")]
+    MissingBasinAttributes {
+        /// The basin ID that was not found.
+        basin_id: String,
+    },
 }

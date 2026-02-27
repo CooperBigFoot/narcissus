@@ -65,6 +65,62 @@ impl std::fmt::Display for ExperimentName {
     }
 }
 
+/// A dataset of basin attributes (static features) for classification.
+///
+/// Produced by [`AttributeReader`](crate::AttributeReader). Basin IDs,
+/// feature names, and feature rows are stored in parallel vectors —
+/// `basin_ids[i]` corresponds to `features[i]`.
+#[derive(Debug)]
+pub struct AttributeDataset {
+    /// Basin identifiers in insertion order.
+    basin_ids: Vec<BasinId>,
+    /// Feature column names from the CSV header.
+    feature_names: Vec<String>,
+    /// Feature values: `features[sample_index][feature_index]`.
+    features: Vec<Vec<f64>>,
+}
+
+impl AttributeDataset {
+    /// Create a new attribute dataset.
+    pub(crate) fn new(
+        basin_ids: Vec<BasinId>,
+        feature_names: Vec<String>,
+        features: Vec<Vec<f64>>,
+    ) -> Self {
+        Self { basin_ids, feature_names, features }
+    }
+
+    /// Return the basin IDs.
+    #[must_use]
+    pub fn basin_ids(&self) -> &[BasinId] {
+        &self.basin_ids
+    }
+
+    /// Return the feature column names.
+    #[must_use]
+    pub fn feature_names(&self) -> &[String] {
+        &self.feature_names
+    }
+
+    /// Return the feature matrix (row-major).
+    #[must_use]
+    pub fn features(&self) -> &[Vec<f64>] {
+        &self.features
+    }
+
+    /// Return the number of samples (basins).
+    #[must_use]
+    pub fn n_samples(&self) -> usize {
+        self.basin_ids.len()
+    }
+
+    /// Return the number of feature columns.
+    #[must_use]
+    pub fn n_features(&self) -> usize {
+        self.feature_names.len()
+    }
+}
+
 /// A dataset of time series with associated basin identifiers.
 ///
 /// Produced by [`TimeSeriesReader`](crate::TimeSeriesReader). Basin IDs and
