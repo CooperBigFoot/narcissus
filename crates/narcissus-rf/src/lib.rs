@@ -13,6 +13,7 @@ mod node;
 mod oob;
 mod predict;
 mod result;
+mod serialize;
 mod split;
 mod tree;
 
