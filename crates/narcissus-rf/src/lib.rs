@@ -4,14 +4,26 @@
 //! Gini/Entropy split criteria, parallel training via rayon, out-of-bag
 //! evaluation, feature importance, and model serialization.
 
+mod config;
 mod confusion;
 mod error;
+mod forest;
+mod importance;
 mod node;
+mod oob;
+mod predict;
+mod result;
 mod split;
 mod tree;
 
+pub use config::{MaxFeatures, OobMode, RandomForestConfig};
 pub use confusion::{ClassMetrics, ConfusionMatrix};
 pub use error::RfError;
+pub use forest::RandomForest;
+pub use importance::RankedFeature;
 pub use node::{FeatureIndex, Impurity, Node, NodeIndex};
+pub use oob::OobScore;
+pub use predict::ClassDistribution;
+pub use result::{RandomForestResult, TrainingMetadata};
 pub use split::SplitCriterion;
 pub use tree::{DecisionTree, DecisionTreeConfig};

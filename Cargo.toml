@@ -9,7 +9,7 @@ repository = "https://github.com/nicolaslazaro/narcissus"
 
 [package]
 name = "narcissus"
-version = "0.1.10"
+version = "0.1.11"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
