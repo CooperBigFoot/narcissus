@@ -123,6 +123,7 @@ pub(crate) fn train(
 
     // Capture config fields needed in closure (avoids borrowing config across thread boundary).
     let criterion = config.criterion;
+    let split_method = config.split_method;
     let max_depth = config.max_depth;
     let min_samples_split = config.min_samples_split;
     let min_samples_leaf = config.min_samples_leaf;
@@ -145,6 +146,7 @@ pub(crate) fn train(
 
             let tree_config = DecisionTreeConfig::new()
                 .with_criterion(criterion)
+                .with_split_method(split_method)
                 .with_max_depth(max_depth)
                 .with_min_samples_split(min_samples_split)
                 .with_min_samples_leaf(min_samples_leaf)
@@ -208,12 +210,13 @@ pub(crate) fn train(
         "random forest training complete"
     );
 
-    Ok(RandomForestResult::new(forest, importances, oob_score, metadata))
+    Ok(RandomForestResult::new(forest, importances, oob_score, oob_indices_per_tree, metadata))
 }
 
 #[cfg(test)]
 mod tests {
     use crate::config::{MaxFeatures, OobMode, RandomForestConfig};
+    use crate::split::SplitMethod;
 
     /// Generate a simple 3-class separable dataset.
     fn make_separable_data() -> (Vec<Vec<f64>>, Vec<usize>, Vec<String>) {
@@ -325,5 +328,25 @@ mod tests {
         let config = RandomForestConfig::new(10).unwrap();
         let err = config.fit(&[], &[], &[]).unwrap_err();
         assert!(matches!(err, crate::RfError::EmptyDataset));
+    }
+
+    #[test]
+    fn extra_trees_three_class_accuracy() {
+        let (features, labels, names) = make_separable_data();
+        let config = RandomForestConfig::new(50)
+            .unwrap()
+            .with_max_features(MaxFeatures::All)
+            .with_split_method(SplitMethod::ExtraTrees)
+            .with_seed(42);
+        let result = config.fit(&features, &labels, &names).unwrap();
+
+        let predictions = result.forest().predict_batch(&features).unwrap();
+        let correct = predictions
+            .iter()
+            .zip(&labels)
+            .filter(|&(&p, &l)| p == l)
+            .count();
+        let accuracy = correct as f64 / labels.len() as f64;
+        assert!(accuracy > 0.85, "extra-trees accuracy = {accuracy}");
     }
 }

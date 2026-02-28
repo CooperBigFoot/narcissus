@@ -5,7 +5,7 @@ use tracing::{debug, instrument};
 use crate::{
     RfError,
     node::{Node, NodeIndex},
-    split::{SplitCriterion, find_best_split},
+    split::{SplitCriterion, SplitMethod, find_split},
 };
 
 /// Configuration for a single CART decision tree.
@@ -17,6 +17,7 @@ use crate::{
 /// | Parameter           | Default             |
 /// |---------------------|---------------------|
 /// | `criterion`         | `Gini`              |
+/// | `split_method`      | `Exact`             |
 /// | `max_depth`         | `None` (unlimited)  |
 /// | `min_samples_split` | 2                   |
 /// | `min_samples_leaf`  | 1                   |
@@ -25,6 +26,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct DecisionTreeConfig {
     pub(crate) criterion: SplitCriterion,
+    pub(crate) split_method: SplitMethod,
     pub(crate) max_depth: Option<usize>,
     pub(crate) min_samples_split: usize,
     pub(crate) min_samples_leaf: usize,
@@ -40,6 +42,7 @@ impl DecisionTreeConfig {
     pub fn new() -> Self {
         Self {
             criterion: SplitCriterion::Gini,
+            split_method: SplitMethod::Exact,
             max_depth: None,
             min_samples_split: 2,
             min_samples_leaf: 1,
@@ -52,6 +55,13 @@ impl DecisionTreeConfig {
     #[must_use]
     pub fn with_criterion(mut self, criterion: SplitCriterion) -> Self {
         self.criterion = criterion;
+        self
+    }
+
+    /// Set the split-finding strategy.
+    #[must_use]
+    pub fn with_split_method(mut self, split_method: SplitMethod) -> Self {
+        self.split_method = split_method;
         self
     }
 
@@ -101,6 +111,12 @@ impl DecisionTreeConfig {
     #[must_use]
     pub fn criterion(&self) -> SplitCriterion {
         self.criterion
+    }
+
+    /// Return the split-finding strategy.
+    #[must_use]
+    pub fn split_method(&self) -> SplitMethod {
+        self.split_method
     }
 
     /// Return the maximum depth limit, if any.
@@ -318,12 +334,13 @@ fn build_tree(
     }
 
     // Try to find a split.
-    let split_result = find_best_split(
+    let split_result = find_split(
         col_features,
         labels,
         sample_indices,
         n_classes,
         &config.criterion,
+        &config.split_method,
         max_features,
         config.min_samples_leaf,
         rng,
@@ -695,5 +712,26 @@ mod tests {
         let labels = vec![0, 1];
         let err = DecisionTreeConfig::new().fit(&features, &labels).unwrap_err();
         assert!(matches!(err, RfError::NonFiniteValue { .. }));
+    }
+
+    #[test]
+    fn extra_trees_linearly_separable() {
+        // Same dataset as linearly_separable_correct_split, but with ExtraTrees.
+        let features = vec![
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+            vec![3.0, 0.0],
+            vec![10.0, 0.0],
+            vec![11.0, 0.0],
+            vec![12.0, 0.0],
+        ];
+        let labels = vec![0, 0, 0, 1, 1, 1];
+        let tree = DecisionTreeConfig::new()
+            .with_split_method(SplitMethod::ExtraTrees)
+            .with_seed(42)
+            .fit(&features, &labels)
+            .unwrap();
+        assert_eq!(tree.predict(&[2.0, 0.0]).unwrap(), 0);
+        assert_eq!(tree.predict(&[11.0, 0.0]).unwrap(), 1);
     }
 }

@@ -3,6 +3,7 @@
 use crate::forest::RandomForest;
 use crate::importance::RankedFeature;
 use crate::oob::OobScore;
+use crate::perm_importance::{PermutationImportance, compute_permutation_importance};
 
 /// Metadata about the training run.
 #[derive(Debug, Clone)]
@@ -22,12 +23,13 @@ pub struct TrainingMetadata {
 /// Result of Random Forest training.
 ///
 /// Contains the fitted forest, feature importances, optional OOB score,
-/// and training metadata.
+/// per-tree OOB indices, and training metadata.
 #[derive(Debug)]
 pub struct RandomForestResult {
     forest: RandomForest,
     importances: Vec<RankedFeature>,
     oob_score: Option<OobScore>,
+    oob_indices_per_tree: Vec<Vec<usize>>,
     metadata: TrainingMetadata,
 }
 
@@ -37,12 +39,14 @@ impl RandomForestResult {
         forest: RandomForest,
         importances: Vec<RankedFeature>,
         oob_score: Option<OobScore>,
+        oob_indices_per_tree: Vec<Vec<usize>>,
         metadata: TrainingMetadata,
     ) -> Self {
         Self {
             forest,
             importances,
             oob_score,
+            oob_indices_per_tree,
             metadata,
         }
     }
@@ -75,5 +79,36 @@ impl RandomForestResult {
     #[must_use]
     pub fn metadata(&self) -> &TrainingMetadata {
         &self.metadata
+    }
+
+    /// Return the per-tree OOB sample indices.
+    #[must_use]
+    pub fn oob_indices_per_tree(&self) -> &[Vec<usize>] {
+        &self.oob_indices_per_tree
+    }
+
+    /// Compute permutation feature importance using OOB samples.
+    ///
+    /// Requires the original training data (features and labels) since they
+    /// are not stored in the result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `features` or `labels` dimensions don't match the training data.
+    #[must_use]
+    pub fn permutation_importances(
+        &self,
+        features: &[Vec<f64>],
+        labels: &[usize],
+        seed: u64,
+    ) -> Vec<PermutationImportance> {
+        compute_permutation_importance(
+            &self.forest,
+            features,
+            labels,
+            &self.oob_indices_per_tree,
+            &self.forest.feature_names,
+            seed,
+        )
     }
 }

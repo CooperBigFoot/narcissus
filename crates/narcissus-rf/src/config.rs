@@ -2,7 +2,7 @@
 
 use crate::error::RfError;
 use crate::result::RandomForestResult;
-use crate::split::SplitCriterion;
+use crate::split::{SplitCriterion, SplitMethod};
 
 /// Strategy for determining the number of features to consider at each split.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,6 +41,7 @@ pub enum OobMode {
 /// | `min_samples_split`  | 2           |
 /// | `min_samples_leaf`   | 1           |
 /// | `criterion`          | `Gini`      |
+/// | `split_method`       | `Exact`     |
 /// | `seed`               | 42          |
 /// | `oob_mode`           | `Disabled`  |
 /// | `bootstrap_fraction` | 1.0         |
@@ -52,6 +53,7 @@ pub struct RandomForestConfig {
     pub(crate) min_samples_split: usize,
     pub(crate) min_samples_leaf: usize,
     pub(crate) criterion: SplitCriterion,
+    pub(crate) split_method: SplitMethod,
     pub(crate) seed: u64,
     pub(crate) oob_mode: OobMode,
     pub(crate) bootstrap_fraction: f64,
@@ -74,6 +76,7 @@ impl RandomForestConfig {
             min_samples_split: 2,
             min_samples_leaf: 1,
             criterion: SplitCriterion::Gini,
+            split_method: SplitMethod::Exact,
             seed: 42,
             oob_mode: OobMode::Disabled,
             bootstrap_fraction: 1.0,
@@ -114,6 +117,13 @@ impl RandomForestConfig {
     #[must_use]
     pub fn with_criterion(mut self, criterion: SplitCriterion) -> Self {
         self.criterion = criterion;
+        self
+    }
+
+    /// Set the split-finding strategy.
+    #[must_use]
+    pub fn with_split_method(mut self, split_method: SplitMethod) -> Self {
+        self.split_method = split_method;
         self
     }
 
@@ -174,6 +184,12 @@ impl RandomForestConfig {
     #[must_use]
     pub fn criterion(&self) -> SplitCriterion {
         self.criterion
+    }
+
+    /// Return the split-finding strategy.
+    #[must_use]
+    pub fn split_method(&self) -> SplitMethod {
+        self.split_method
     }
 
     /// Return the random seed.
