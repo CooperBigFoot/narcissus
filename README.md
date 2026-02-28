@@ -12,12 +12,13 @@ Clusters basins by streamflow shape using Dynamic Time Warping, then trains a Ra
 # Build
 cargo build --release
 
-# 1. Find the best cluster count (elbow method)
+# 1. Find the best cluster count (elbow + silhouette)
 narcissus optimize \
   --data streamflow.csv \
   --min-k 4 --max-k 20 \
   --experiment run1 \
-  --output-dir results/
+  --output-dir results/ \
+  --silhouette
 
 # 2. Cluster at the chosen k
 narcissus cluster \
@@ -32,7 +33,9 @@ narcissus evaluate \
   --attributes basin_attrs.csv \
   --k 12 \
   --experiment run1 \
-  --output-dir results/
+  --output-dir results/ \
+  --split-method extra-trees \
+  --normalize
 
 # 4. Predict cluster membership for new basins
 narcissus predict \
@@ -73,9 +76,9 @@ graph TD
 
 | Crate | Role |
 |---|---|
-| **narcissus-dtw** | Pure math. DTW distance, Sakoe-Chiba constraint, DBA barycenter averaging. Zero I/O. |
-| **narcissus-cluster** | DTW K-means with k-means++ init, multi-restart, elbow optimization. |
-| **narcissus-rf** | CART decision trees, Random Forest ensemble, stratified CV, OOB, feature importance, bincode serialization. |
+| **narcissus-dtw** | Pure math. DTW distance, Sakoe-Chiba constraint, DBA barycenter averaging, LB_Keogh/LB_Improved lower bounds, early abandoning, PrunedDTW, z-normalization, derivative DTW, SSG averaging. Zero I/O. |
+| **narcissus-cluster** | DTW K-means with k-means++ init, multi-restart, elbow optimization. Elkan's triangle inequality acceleration, K-Means|| initialization, mini-batch K-means, silhouette scoring. |
+| **narcissus-rf** | CART decision trees, Random Forest ensemble, stratified CV, OOB, feature importance, bincode serialization. Extra-Trees, histogram-based splits, permutation feature importance. |
 | **narcissus-io** | CSV readers, JSON writers, parse-don't-validate domain types, basin/attribute alignment. |
 
 ## Key Design Decisions
@@ -85,6 +88,7 @@ graph TD
 - **Deterministic** — `ChaCha8Rng` seeded from `--seed` (default 42). Same input + same seed = same output.
 - **Type-driven** — newtypes (`BasinId`, `ClusterLabel`, `Inertia`, `DtwDistance`), enums over booleans, parse-don't-validate at I/O boundaries.
 - **JSON to stdout, diagnostics to stderr** — every command is pipeable and parseable.
+- **Algorithmic acceleration** — LB_Keogh lower bounds, PrunedDTW with early abandoning, Elkan's triangle inequality for K-means, histogram-based O(n+B) splits for Random Forest.
 - **Bincode model format** — versioned envelope for forward compatibility.
 
 ## Documentation
@@ -92,6 +96,7 @@ graph TD
 - [User Guide](docs/userguide.md) — full CLI reference, input formats, output schemas, pipeline walkthrough
 - [narcissus-dtw README](crates/narcissus-dtw/README.md) — DTW crate architecture and glossary
 - [narcissus-cluster README](crates/narcissus-cluster/README.md) — clustering crate architecture and glossary
+- [narcissus-rf README](crates/narcissus-rf/README.md) — RF crate architecture and glossary
 
 ## License
 

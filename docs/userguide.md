@@ -14,6 +14,9 @@ Complete reference for the narcissus CLI. This document is optimized for LLM con
   - [predict](#predict)
 - [Global Flags](#global-flags)
 - [Clustering Tuning Flags](#clustering-tuning-flags)
+- [Preprocessing Flags](#preprocessing-flags)
+- [Advanced Clustering Flags](#advanced-clustering-flags)
+- [Random Forest Flags](#random-forest-flags)
 - [Output Artifacts](#output-artifacts)
 - [End-to-End Example](#end-to-end-example)
 - [Determinism and Reproducibility](#determinism-and-reproducibility)
@@ -54,7 +57,7 @@ cargo build --release
 # Binary is at target/release/narcissus
 ```
 
-Requires Rust 1.75+ (2021 edition, resolver v2).
+Requires Rust 1.85+ (2024 edition).
 
 ---
 
@@ -118,6 +121,7 @@ narcissus optimize \
 | `--max-k` | integer | yes | — | Maximum k to try (must be >= min-k) |
 | `--experiment` | string | yes | — | Experiment name (`[a-zA-Z0-9_-]+`) |
 | `--output-dir` | path | no | `.` | Output directory (created if missing) |
+| `--silhouette` | flag | no | off | Compute silhouette scores alongside inertia |
 | + [tuning flags](#clustering-tuning-flags) | | | | |
 
 **Stdout JSON:**
@@ -195,7 +199,8 @@ narcissus evaluate \
   --experiment my_run \
   --output-dir results/ \
   --cv-folds 5 \
-  --n-trees 100
+  --n-trees 100 \
+  --split-method exact
 ```
 
 **Arguments:**
@@ -210,6 +215,7 @@ narcissus evaluate \
 | `--cv-folds` | integer | no | `5` | Number of cross-validation folds (>= 2) |
 | `--n-trees` | integer | no | `100` | Number of trees in the Random Forest |
 | `--max-depth` | integer | no | unlimited | Maximum tree depth |
+| `--split-method` | string | no | `exact` | Split-finding strategy: `exact` (CART), `extra-trees` (random threshold), or `histogram` (quantile binning) |
 | + [tuning flags](#clustering-tuning-flags) | | | | |
 
 **Stdout JSON:**
@@ -318,6 +324,41 @@ Available on `optimize`, `cluster`, and `evaluate`.
 | `--max-iter <usize>` | integer | `75` | Maximum iterations per K-means run. |
 | `--warping-window <usize>` | integer | `2` | Sakoe-Chiba band radius in time steps. `0` = unconstrained DTW. |
 | `--tol <f64>` | float | `1e-4` | Convergence tolerance. A run converges when the relative inertia change drops below this. |
+
+---
+
+## Preprocessing Flags
+
+Available on `optimize`, `cluster`, and `evaluate`.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--normalize` | flag | off | Z-normalize time series before DTW (zero mean, unit variance) |
+| `--derivative` | flag | off | Use Keogh-Pazzani first derivative transform before DTW |
+
+---
+
+## Advanced Clustering Flags
+
+Available on `optimize`, `cluster`, and `evaluate`.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--dba-init` | string | `mean` | DBA initialization: `mean` (element-wise mean) or `medoid` (argmin sum-of-DTW) |
+| `--dba-sample-fraction` | float | `1.0` | Fraction of cluster members sampled per DBA iteration. `1.0` = full DBA, `< 1.0` = stochastic DBA |
+| `--centroid-method` | string | `dba` | Centroid averaging method: `dba` (DTW Barycenter Averaging) or `ssg` (Stochastic Subgradient) |
+| `--elkan` | flag | off | Use Elkan's triangle inequality acceleration for K-means assignment |
+| `--init-strategy` | string | `kpp` | Initialization: `kpp` (K-Means++) or `parallel` (K-Means‖, Bahmani et al. 2012) |
+
+---
+
+## Random Forest Flags
+
+Available on `evaluate` only.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--split-method` | string | `exact` | `exact` = CART O(n log n) sort per feature; `extra-trees` = random threshold O(n); `histogram` = quantile binning O(n + B) |
 
 ---
 
@@ -440,6 +481,11 @@ Sources of randomness:
 - Random Forest bootstrap sampling
 - Feature subset selection at each tree split
 - Stratified k-fold CV shuffle
+- Extra-Trees random threshold selection
+- Stochastic DBA sampling
+- K-Means‖ oversampled initialization
+- Mini-batch K-means batch sampling
+- Permutation feature importance column shuffle
 
 Thread count does **not** affect determinism — Rayon parallelism is structured so results are order-independent.
 
@@ -470,6 +516,7 @@ Narcissus validates all inputs at the boundary and reports structured errors. Co
 | `InvalidTreeCount` | n-trees = 0 | Use n-trees >= 1 |
 | `InvalidFoldCount` | cv-folds < 2 | Use cv-folds >= 2 |
 | `TooFewSamplesForFolds` | A cluster has fewer members than the number of CV folds | Reduce cv-folds or increase k (to make clusters smaller but more numerous) or reduce k (to make clusters larger) |
+| `BatchTooLarge` | Mini-batch batch_size exceeds n_series | Reduce batch_size or use standard K-means |
 
 ### Model Errors
 
