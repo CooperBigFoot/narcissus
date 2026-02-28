@@ -1,43 +1,48 @@
 # Narcissus
 
-A high-performance Rust CLI for shape-based hydrological basin clustering and classification. Ported from [find-similar-basins](https://github.com/nicolaslazaro/find-similar-basins) (Python) with hand-rolled algorithms for maximum throughput.
+High-performance Rust CLI for shape-based hydrological basin clustering and classification.
 
-Designed to be driven by an LLM agent — structured JSON output, deterministic execution, composable subcommands.
+Clusters basins by streamflow shape using Dynamic Time Warping, then trains a Random Forest to predict cluster membership from static attributes. Every algorithm is hand-rolled for throughput. Every command emits structured JSON to stdout, making the tool composable and LLM-drivable.
 
 > **Based on:** Yang & Olivera (2023) — *"Classification of watersheds in the conterminous United States using shape-based time-series clustering and Random Forests."*
 
----
+## Quick Start
 
-## Component Tracker
+```bash
+# Build
+cargo build --release
 
-High-level capabilities that Narcissus must deliver. Status: `pending` | `in-progress` | `done` | `deferred`.
+# 1. Find the best cluster count (elbow method)
+narcissus optimize \
+  --data streamflow.csv \
+  --min-k 4 --max-k 20 \
+  --experiment run1 \
+  --output-dir results/
 
-| # | Component | Description | Status | Notes |
-|---|---|---|---|---|
-| 1 | **DTW distance** | Dynamic Time Warping with configurable warping window (Sakoe-Chiba). The core distance metric. | `done` | Hand-rolled. Sakoe-Chiba band constraint (radius=2 weeks for 52-week series). Rolling-buffer fast path (112 bytes for n=52, r=2). Rayon-parallelized pairwise computation. Cross-validated against `dtaidistance` (Python). |
-| 2 | **Barycenter averaging** | Compute a representative centroid for a group of time series under DTW alignment (DBA algorithm). | `done` | Hand-rolled. DBA algorithm (Petitjean et al. 2011). Iterative warping-path alignment to update centroid. Configurable convergence tolerance and max iterations. |
-| 3 | **K-means clustering** | Cluster time series into k groups using DTW as the distance metric. Includes smart initialization (k-means++) and multi-restart. | `done` | Hand-rolled. K-means++ initialization. Rayon-parallelized assign/update steps and multi-restart. DBA centroids. Empty cluster rescue. Deterministic via ChaCha8Rng. |
-| 4 | **Cluster count selection** | Run clustering across a range of k values and report fit quality (inertia) so the user or LLM can pick the best k (elbow method). | `done` | Sequential sweep over k range. Maximum second-derivative elbow detection. |
-| 5 | **Random Forest classification** | Train a classifier that maps static basin attributes → cluster labels. Must support probability output (top-k predictions). | `done` | Hand-rolled. Parallel tree training via Rayon. Bootstrap sampling. K-means++ style max_features (Sqrt, Log2, Fraction, Fixed, All). Gini-based splits. ChaCha8Rng determinism. |
-| 6 | **Model evaluation** | Cross-validated accuracy, confusion matrix, feature importance ranking. | `done` | Stratified k-fold CV with per-fold accuracy tracking + mean/std. Aggregated confusion matrix with per-class precision/recall/F1/support. OOB evaluation mode. Gini-based feature importance (normalized, ranked). Cross-validated against scikit-learn. |
-| 7 | **Prediction** | Load a trained model, predict cluster membership with probabilities for new basins. | `done` | Batch `predict_proba` averaged across trees. `ClassDistribution::top_k(k)` for ranked output. Parallel execution via Rayon. |
-| 8 | **Data ingestion** | Read time series and tabular attribute data from disk. Format TBD (CSV, NPY, Parquet, or custom). | `done` | CSV reader (`TimeSeriesReader`) in narcissus-io. Header-based format: `basin_id,t0,t1,...,tn`. Full validation pipeline (6 error variants). |
-| 9 | **Validation** | Validate inputs at the boundary: shape, missing values, ID consistency, feature schema matching. | `done` | Parse-don't-validate newtypes (`BasinId`, `ExperimentName`). Row length, duplicate ID, non-finite value, and empty dataset checks. |
-| 10 | **Result persistence** | Write cluster assignments, centroids, model artifacts, and evaluation metrics to disk. | `done` | JSON writer (`ResultWriter`) in narcissus-io. Shadow-struct serialization — no serde on cluster types. `{experiment}_cluster.json` and `{experiment}_optimize.json`. |
-| 11 | **CLI** | Subcommand-based interface (`optimize`, `cluster`, `evaluate`, `predict`). JSON to stdout, diagnostics to stderr. | `done` | All four subcommands fully wired. `TuningArgs` flattened into `optimize` and `cluster`. Rayon `--threads` flag. `evaluate` trains + CV + saves model. `predict` loads model + batch inference + top-k output. |
-| 12 | **Model serialization** | Save/load trained RF models in a Rust-native format. | `done` | Bincode binary format with versioned envelope (`FORMAT_VERSION = 1`). `forest.save(path)` / `RandomForest::load(path)`. Round-trip tested. |
+# 2. Cluster at the chosen k
+narcissus cluster \
+  --data streamflow.csv \
+  --k 12 \
+  --experiment run1 \
+  --output-dir results/
 
-### Design Questions (all resolved)
+# 3. Train & evaluate a Random Forest classifier
+narcissus evaluate \
+  --data streamflow.csv \
+  --attributes basin_attrs.csv \
+  --k 12 \
+  --experiment run1 \
+  --output-dir results/
 
-| Question | Resolution |
-|---|---|
-| RF implementation | **Hand-rolled** — parallel Gini-based decision trees with bootstrap sampling |
-| Input time series format | **CSV** — `basin_id,t0,...,tn` |
-| Input attributes format | **CSV** — row per basin, columns are features |
-| Centroid output format | **JSON** — embedded in cluster result artifact |
-| Model binary format | **Bincode** — versioned envelope (`FORMAT_VERSION = 1`), fast and compact |
+# 4. Predict cluster membership for new basins
+narcissus predict \
+  --model results/run1_model.bin \
+  --attributes new_basins.csv \
+  --experiment run1 \
+  --output-dir results/
+```
 
----
+All output goes to stdout as JSON. Diagnostics go to stderr via `tracing`.
 
 ## Architecture
 
@@ -47,162 +52,47 @@ narcissus (workspace root)
 ├── crates/
 │   ├── narcissus-dtw/      # DTW distance + DBA barycenter averaging
 │   ├── narcissus-cluster/  # K-means loop, initialization, elbow optimization
-│   ├── narcissus-rf/       # Random Forest: train, evaluate, predict
-│   └── narcissus-io/       # File I/O, validation, serialization
-└── src/
-    └── main.rs             # CLI (clap subcommands)
+│   ├── narcissus-rf/       # Random Forest: train, evaluate, predict, serialize
+│   └── narcissus-io/       # CSV readers, JSON writers, validation
+├── src/
+│   └── main.rs             # CLI (clap subcommands)
+└── docs/
+    └── userguide.md        # Full usage reference
 ```
 
-### Crate Dependency Graph
-
-```
-narcissus (bin)
-├── narcissus-cluster
-│   └── narcissus-dtw
-├── narcissus-rf
-└── narcissus-io
-    ├── narcissus-dtw
-    └── narcissus-cluster
-```
-
-- **narcissus-dtw** — Pure math, zero I/O. DTW distance computation and DBA.
-- **narcissus-cluster** — Orchestrates clustering using DTW primitives.
-- **narcissus-rf** — Independent of DTW. Operates on tabular (attribute → label) data.
-- **narcissus-io** — All file formats, parsing, validation, serialization.
-- **narcissus** (bin) — Thin CLI shell. Wires crates together behind `clap`.
-
----
-
-## CLI Design
-
-All commands emit structured JSON to **stdout**. Progress and diagnostics go to **stderr** via `tracing`. This makes every command pipeable and parseable by an LLM.
-
-### `narcissus optimize`
-
-Run clustering for a range of k values. Output fit quality per k.
-
-```bash
-narcissus optimize \
-  --data streamflow.csv \
-  --min-k 4 \
-  --max-k 20 \
-  --experiment my_run \
-  --output-dir results/
+```mermaid
+graph TD
+    CLI[narcissus binary]
+    CLI --> CLUSTER[narcissus-cluster]
+    CLI --> RF[narcissus-rf]
+    CLI --> IO[narcissus-io]
+    CLUSTER --> DTW[narcissus-dtw]
+    IO --> DTW
+    IO --> CLUSTER
 ```
 
-```json
-{
-  "experiment": "my_run",
-  "n_basins": 24000,
-  "results": [
-    {"k": 4, "inertia": 2834.2},
-    {"k": 5, "inertia": 2567.1}
-  ]
-}
-```
+| Crate | Role |
+|---|---|
+| **narcissus-dtw** | Pure math. DTW distance, Sakoe-Chiba constraint, DBA barycenter averaging. Zero I/O. |
+| **narcissus-cluster** | DTW K-means with k-means++ init, multi-restart, elbow optimization. |
+| **narcissus-rf** | CART decision trees, Random Forest ensemble, stratified CV, OOB, feature importance, bincode serialization. |
+| **narcissus-io** | CSV readers, JSON writers, parse-don't-validate domain types, basin/attribute alignment. |
 
-### `narcissus cluster`
+## Key Design Decisions
 
-Cluster for a single k. Save assignments and centroids.
+- **All algorithms hand-rolled** — no `smartcore`, no `linfa`. Full control over parallelism and memory.
+- **Rayon everywhere** — pairwise DTW, K-means restarts, tree training, batch prediction.
+- **Deterministic** — `ChaCha8Rng` seeded from `--seed` (default 42). Same input + same seed = same output.
+- **Type-driven** — newtypes (`BasinId`, `ClusterLabel`, `Inertia`, `DtwDistance`), enums over booleans, parse-don't-validate at I/O boundaries.
+- **JSON to stdout, diagnostics to stderr** — every command is pipeable and parseable.
+- **Bincode model format** — versioned envelope for forward compatibility.
 
-```bash
-narcissus cluster \
-  --data streamflow.csv \
-  --k 15 \
-  --experiment my_run \
-  --output-dir results/
-```
+## Documentation
 
-```json
-{
-  "experiment": "my_run",
-  "k": 15,
-  "inertia": 1523.4,
-  "n_basins": 24000,
-  "cluster_sizes": [1200, 980, 1450]
-}
-```
+- [User Guide](docs/userguide.md) — full CLI reference, input formats, output schemas, pipeline walkthrough
+- [narcissus-dtw README](crates/narcissus-dtw/README.md) — DTW crate architecture and glossary
+- [narcissus-cluster README](crates/narcissus-cluster/README.md) — clustering crate architecture and glossary
 
-### `narcissus evaluate`
+## License
 
-Train a classifier on cluster labels + basin attributes. Report cross-validated accuracy.
-
-```bash
-narcissus evaluate \
-  --experiment my_run \
-  --k 15 \
-  --attributes basin_attrs.csv \
-  --cv-folds 5 \
-  --output-dir results/
-```
-
-```json
-{
-  "experiment": "my_run",
-  "k": 15,
-  "cv_accuracy": 0.856,
-  "n_features": 12,
-  "top_features": [
-    {"attribute": "frac_snow", "importance": 0.23, "rank": 1},
-    {"attribute": "elevation_m", "importance": 0.18, "rank": 2}
-  ]
-}
-```
-
-### `narcissus predict`
-
-Predict cluster membership for new basins using a trained model.
-
-```bash
-narcissus predict \
-  --experiment my_run \
-  --k 15 \
-  --attributes new_basins.csv \
-  --top-k 3 \
-  --output-dir results/
-```
-
-```json
-{
-  "experiment": "my_run",
-  "k": 15,
-  "n_predicted": 500,
-  "predictions": [
-    {
-      "basin_id": "NEW_001",
-      "clusters": [
-        {"cluster": 5, "probability": 0.72},
-        {"cluster": 12, "probability": 0.15},
-        {"cluster": 3, "probability": 0.08}
-      ]
-    }
-  ]
-}
-```
-
-### Common Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--seed <u64>` | `42` | RNG seed for reproducibility |
-| `--threads <usize>` | all cores | Rayon thread pool size |
-| `--verbose` | off | Debug-level tracing to stderr |
-| `--quiet` | off | Suppress all stderr except errors |
-
-### Clustering Tuning Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--n-init <usize>` | `10` | K-means restarts (keep best) |
-| `--max-iter <usize>` | `75` | Max iterations per run |
-| `--warping-window <usize>` | `2` | Sakoe-Chiba radius (time steps) |
-| `--tol <f64>` | `1e-4` | Convergence tolerance |
-
----
-
-## Performance Strategy
-
-- **DTW inner loop**: Cache-friendly DP matrix layout, potential SIMD, reusable scratch buffers
-- **Parallelism**: Rayon for distance matrix computation, tree building, cross-validation folds
-- **Memory**: Arena/pool allocation for DP matrices across basin pairs; contiguous row-major time series storage
-- **I/O**: Memory-mapped files for large datasets where possible
+MIT
