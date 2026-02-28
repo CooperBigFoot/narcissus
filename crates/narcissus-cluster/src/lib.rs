@@ -4,18 +4,21 @@
 //! multi-restart optimization, and elbow-method cluster count selection.
 
 mod config;
+mod elkan;
 mod error;
 mod inertia;
 mod init;
 mod kmeans;
 mod label;
 mod result;
+mod silhouette;
 
 pub use config::{KMeansConfig, OptimizeConfig};
 pub use error::ClusterError;
 pub use inertia::Inertia;
 pub use label::ClusterLabel;
 pub use result::{KMeansResult, KResult, OptimizeResult};
+pub use silhouette::{compute_silhouette, SampleSilhouette, SilhouetteScore};
 
 #[cfg(test)]
 mod tests {

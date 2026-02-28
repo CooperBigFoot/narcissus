@@ -18,6 +18,7 @@ use crate::result::{KMeansResult, OptimizeResult};
 /// | `tol`          | 1e-4    |
 /// | `seed`         | 42      |
 /// | `dba_max_iter` | 10      |
+/// | `use_elkan`    | false   |
 #[derive(Debug, Clone)]
 pub struct KMeansConfig {
     pub(crate) k: usize,
@@ -27,6 +28,7 @@ pub struct KMeansConfig {
     pub(crate) tol: f64,
     pub(crate) seed: u64,
     pub(crate) dba_max_iter: usize,
+    pub(crate) use_elkan: bool,
 }
 
 impl KMeansConfig {
@@ -49,6 +51,7 @@ impl KMeansConfig {
             tol: 1e-4,
             seed: 42,
             dba_max_iter: 10,
+            use_elkan: false,
         })
     }
 
@@ -86,6 +89,18 @@ impl KMeansConfig {
     #[must_use]
     pub fn with_dba_max_iter(mut self, dba_max_iter: usize) -> Self {
         self.dba_max_iter = dba_max_iter;
+        self
+    }
+
+    /// Enable or disable Elkan's triangle inequality acceleration for the
+    /// assignment step.
+    ///
+    /// When enabled, per-series distance bounds are maintained across iterations
+    /// to skip redundant DTW computations. Most beneficial when `k` and `n` are
+    /// large. Disabled by default.
+    #[must_use]
+    pub fn with_use_elkan(mut self, use_elkan: bool) -> Self {
+        self.use_elkan = use_elkan;
         self
     }
 
@@ -131,6 +146,12 @@ impl KMeansConfig {
         self.dba_max_iter
     }
 
+    /// Return whether Elkan's triangle inequality acceleration is enabled.
+    #[must_use]
+    pub fn use_elkan(&self) -> bool {
+        self.use_elkan
+    }
+
     /// Cluster `series` using this configuration.
     ///
     /// # Errors
@@ -145,7 +166,7 @@ impl KMeansConfig {
         if n < self.k {
             return Err(ClusterError::TooFewSeries { n_series: n, k: self.k });
         }
-        crate::kmeans::multi_restart(series, self)
+        crate::kmeans::multi_restart(series, self, None)
     }
 }
 
@@ -162,7 +183,8 @@ impl KMeansConfig {
 /// | `max_iter`     | 75      |
 /// | `tol`          | 1e-4    |
 /// | `seed`         | 42      |
-/// | `dba_max_iter` | 10      |
+/// | `dba_max_iter`       | 10      |
+/// | `precompute_matrix`  | true    |
 #[derive(Debug, Clone)]
 pub struct OptimizeConfig {
     pub(crate) min_k: usize,
@@ -173,6 +195,7 @@ pub struct OptimizeConfig {
     pub(crate) tol: f64,
     pub(crate) seed: u64,
     pub(crate) dba_max_iter: usize,
+    pub(crate) precompute_matrix: bool,
 }
 
 impl OptimizeConfig {
@@ -204,6 +227,7 @@ impl OptimizeConfig {
             tol: 1e-4,
             seed: 42,
             dba_max_iter: 10,
+            precompute_matrix: true,
         })
     }
 
@@ -290,6 +314,23 @@ impl OptimizeConfig {
         self.dba_max_iter
     }
 
+    /// Set whether to precompute the pairwise distance matrix for K-means++ initialization.
+    ///
+    /// When enabled, a single O(n^2) DTW pairwise computation is performed once and
+    /// reused across all K-means restarts and k values, avoiding redundant distance
+    /// calculations during initialization.
+    #[must_use]
+    pub fn with_precompute_matrix(mut self, precompute_matrix: bool) -> Self {
+        self.precompute_matrix = precompute_matrix;
+        self
+    }
+
+    /// Return whether pairwise distance matrix precomputation is enabled.
+    #[must_use]
+    pub fn precompute_matrix(&self) -> bool {
+        self.precompute_matrix
+    }
+
     /// Run K-means for each k in `[min_k, max_k]` and return the full inertia curve.
     ///
     /// # Errors
@@ -371,5 +412,20 @@ mod tests {
         assert!((cfg.tol() - 1e-4).abs() < f64::EPSILON);
         assert_eq!(cfg.seed(), 42);
         assert_eq!(cfg.dba_max_iter(), 10);
+    }
+
+    #[test]
+    fn use_elkan_default_false() {
+        let cfg = KMeansConfig::new(3, BandConstraint::Unconstrained).unwrap();
+        assert!(!cfg.use_elkan(), "use_elkan should default to false");
+    }
+
+    #[test]
+    fn precompute_matrix_default_true() {
+        let cfg = OptimizeConfig::new(2, 5, BandConstraint::Unconstrained).unwrap();
+        assert!(
+            cfg.precompute_matrix(),
+            "precompute_matrix should default to true"
+        );
     }
 }
