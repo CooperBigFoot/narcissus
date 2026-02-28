@@ -13,7 +13,7 @@ use std::fs;
 
 use serde::Deserialize;
 
-use narcissus_rf::{MaxFeatures, OobMode, RandomForestConfig};
+use narcissus_rf::{CrossValidation, MaxFeatures, OobMode, RandomForestConfig};
 
 // ── JSON schema matching rf_reference.json ──────────────────────────────
 
@@ -21,6 +21,7 @@ use narcissus_rf::{MaxFeatures, OobMode, RandomForestConfig};
 struct Reference {
     dataset: DatasetRef,
     sklearn_rf: SklearnRf,
+    sklearn_cv: SklearnCv,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +40,33 @@ struct SklearnRf {
     feature_importances: Vec<f64>,
     importance_ranking: Vec<usize>,
     train_accuracy: f64,
+}
+
+#[derive(Deserialize)]
+struct SklearnCv {
+    n_folds: usize,
+    mean_accuracy: f64,
+    std_accuracy: f64,
+    #[allow(dead_code)]
+    fold_accuracies: Vec<f64>,
+    #[allow(dead_code)]
+    confusion_matrix: Vec<Vec<usize>>,
+    overall_accuracy: f64,
+    class_metrics: Vec<SklearnClassMetrics>,
+    #[allow(dead_code)]
+    feature_importances: Vec<f64>,
+    importance_ranking: Vec<usize>,
+}
+
+#[derive(Deserialize)]
+struct SklearnClassMetrics {
+    #[allow(dead_code)]
+    class: usize,
+    precision: f64,
+    recall: f64,
+    f1: f64,
+    #[allow(dead_code)]
+    support: usize,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -281,6 +309,140 @@ fn main() {
         "n_classes",
         ref_data.dataset.n_classes == 3,
         &format!("n_classes={}", ref_data.dataset.n_classes),
+    );
+
+    // ── 8. Cross-validation comparison ──────────────────────────────────
+
+    println!("\n=== Cross-validation (5-fold) ===");
+
+    let cv = CrossValidation::new(5).unwrap().with_seed(42);
+    let cv_config = RandomForestConfig::new(100)
+        .unwrap()
+        .with_max_features(MaxFeatures::Sqrt)
+        .with_seed(42);
+
+    let cv_result = cv
+        .evaluate(
+            &cv_config,
+            &ref_data.dataset.features,
+            &ref_data.dataset.labels,
+            &ref_data.dataset.feature_names,
+        )
+        .unwrap();
+
+    let sklearn_cv = &ref_data.sklearn_cv;
+
+    // Check: CV n_folds matches
+    check_and_count(
+        "cv n_folds",
+        cv_result.n_folds == sklearn_cv.n_folds,
+        &format!("rust={}, sklearn={}", cv_result.n_folds, sklearn_cv.n_folds),
+    );
+
+    // Check: CV mean accuracy close
+    let cv_mean_diff = (cv_result.mean_accuracy - sklearn_cv.mean_accuracy).abs();
+    check_and_count(
+        "cv mean accuracy close",
+        cv_mean_diff < 0.05,
+        &format!(
+            "diff={cv_mean_diff:.4}, rust={:.4}, sklearn={:.4}",
+            cv_result.mean_accuracy, sklearn_cv.mean_accuracy
+        ),
+    );
+
+    // Check: CV mean accuracy high (well-separated data)
+    check_and_count(
+        "cv mean accuracy high",
+        cv_result.mean_accuracy > 0.85,
+        &format!("rust_mean={:.4}", cv_result.mean_accuracy),
+    );
+
+    // Check: CV std accuracy low (consistent folds on well-separated data)
+    check_and_count(
+        "cv std accuracy low",
+        cv_result.std_accuracy < 0.10,
+        &format!(
+            "rust_std={:.4}, sklearn_std={:.4}",
+            cv_result.std_accuracy, sklearn_cv.std_accuracy
+        ),
+    );
+
+    // Check: Aggregated confusion matrix accuracy close
+    let rust_cm_accuracy = cv_result.confusion_matrix.accuracy();
+    let cm_acc_diff = (rust_cm_accuracy - sklearn_cv.overall_accuracy).abs();
+    check_and_count(
+        "cv confusion matrix accuracy close",
+        cm_acc_diff < 0.05,
+        &format!(
+            "diff={cm_acc_diff:.4}, rust={rust_cm_accuracy:.4}, sklearn={:.4}",
+            sklearn_cv.overall_accuracy
+        ),
+    );
+
+    // Check: Per-class metrics close (precision, recall, F1 within 0.10)
+    let rust_class_metrics = cv_result.confusion_matrix.class_metrics();
+    let mut class_metrics_ok = true;
+    for (rust_m, sklearn_m) in rust_class_metrics.iter().zip(&sklearn_cv.class_metrics) {
+        let p_diff = (rust_m.precision - sklearn_m.precision).abs();
+        let r_diff = (rust_m.recall - sklearn_m.recall).abs();
+        let f1_diff = (rust_m.f1 - sklearn_m.f1).abs();
+        if p_diff > 0.10 || r_diff > 0.10 || f1_diff > 0.10 {
+            class_metrics_ok = false;
+            println!(
+                "    class {}: p_diff={p_diff:.4}, r_diff={r_diff:.4}, f1_diff={f1_diff:.4}",
+                rust_m.class
+            );
+        }
+    }
+    check_and_count(
+        "cv per-class metrics close",
+        class_metrics_ok,
+        &format!(
+            "{}",
+            rust_class_metrics
+                .iter()
+                .map(|m| format!(
+                    "c{}:p={:.3}/r={:.3}/f1={:.3}",
+                    m.class, m.precision, m.recall, m.f1
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+
+    // Check: CV feature importance ranking correlation
+    let mut rust_cv_ranking = vec![0usize; ref_data.dataset.n_features];
+    for feat in &cv_result.feature_importances {
+        if let Some(idx) = ref_data
+            .dataset
+            .feature_names
+            .iter()
+            .position(|n| n == &feat.name)
+        {
+            rust_cv_ranking[idx] = feat.rank;
+        }
+    }
+    let mut sklearn_cv_ranking = vec![0usize; ref_data.dataset.n_features];
+    for (rank, &feat_idx) in sklearn_cv.importance_ranking.iter().enumerate() {
+        sklearn_cv_ranking[feat_idx] = rank + 1;
+    }
+    let cv_rho = spearman_rho(&rust_cv_ranking, &sklearn_cv_ranking);
+    check_and_count(
+        "cv importance Spearman rho",
+        cv_rho > 0.6,
+        &format!("rho={cv_rho:.4}"),
+    );
+
+    // Check: CV importances sum to 1.0
+    let cv_imp_sum: f64 = cv_result
+        .feature_importances
+        .iter()
+        .map(|f| f.importance)
+        .sum();
+    check_and_count(
+        "cv importances sum to 1.0",
+        (cv_imp_sum - 1.0).abs() < 1e-10,
+        &format!("sum={cv_imp_sum:.10}"),
     );
 
     // ── Summary ─────────────────────────────────────────────────────────
