@@ -18,24 +18,24 @@ High-level capabilities that Narcissus must deliver. Status: `pending` | `in-pro
 | 2 | **Barycenter averaging** | Compute a representative centroid for a group of time series under DTW alignment (DBA algorithm). | `done` | Hand-rolled. DBA algorithm (Petitjean et al. 2011). Iterative warping-path alignment to update centroid. Configurable convergence tolerance and max iterations. |
 | 3 | **K-means clustering** | Cluster time series into k groups using DTW as the distance metric. Includes smart initialization (k-means++) and multi-restart. | `done` | Hand-rolled. K-means++ initialization. Rayon-parallelized assign/update steps and multi-restart. DBA centroids. Empty cluster rescue. Deterministic via ChaCha8Rng. |
 | 4 | **Cluster count selection** | Run clustering across a range of k values and report fit quality (inertia) so the user or LLM can pick the best k (elbow method). | `done` | Sequential sweep over k range. Maximum second-derivative elbow detection. |
-| 5 | **Random Forest classification** | Train a classifier that maps static basin attributes → cluster labels. Must support probability output (top-k predictions). | `pending` | Evaluate existing Rust crates (`smartcore`, `linfa-ensemble`) vs. hand-rolling. Decision deferred until clustering is done. |
-| 6 | **Model evaluation** | Cross-validated accuracy, confusion matrix, feature importance ranking. | `pending` | Depends on #5. Stratified k-fold CV needed. |
-| 7 | **Prediction** | Load a trained model, predict cluster membership with probabilities for new basins. | `pending` | Depends on #5. Top-k ranked output. |
+| 5 | **Random Forest classification** | Train a classifier that maps static basin attributes → cluster labels. Must support probability output (top-k predictions). | `done` | Hand-rolled. Parallel tree training via Rayon. Bootstrap sampling. K-means++ style max_features (Sqrt, Log2, Fraction, Fixed, All). Gini-based splits. ChaCha8Rng determinism. |
+| 6 | **Model evaluation** | Cross-validated accuracy, confusion matrix, feature importance ranking. | `done` | Stratified k-fold CV with per-fold accuracy tracking + mean/std. Aggregated confusion matrix with per-class precision/recall/F1/support. OOB evaluation mode. Gini-based feature importance (normalized, ranked). Cross-validated against scikit-learn. |
+| 7 | **Prediction** | Load a trained model, predict cluster membership with probabilities for new basins. | `done` | Batch `predict_proba` averaged across trees. `ClassDistribution::top_k(k)` for ranked output. Parallel execution via Rayon. |
 | 8 | **Data ingestion** | Read time series and tabular attribute data from disk. Format TBD (CSV, NPY, Parquet, or custom). | `done` | CSV reader (`TimeSeriesReader`) in narcissus-io. Header-based format: `basin_id,t0,t1,...,tn`. Full validation pipeline (6 error variants). |
 | 9 | **Validation** | Validate inputs at the boundary: shape, missing values, ID consistency, feature schema matching. | `done` | Parse-don't-validate newtypes (`BasinId`, `ExperimentName`). Row length, duplicate ID, non-finite value, and empty dataset checks. |
 | 10 | **Result persistence** | Write cluster assignments, centroids, model artifacts, and evaluation metrics to disk. | `done` | JSON writer (`ResultWriter`) in narcissus-io. Shadow-struct serialization — no serde on cluster types. `{experiment}_cluster.json` and `{experiment}_optimize.json`. |
-| 11 | **CLI** | Subcommand-based interface (`optimize`, `cluster`, `evaluate`, `predict`). JSON to stdout, diagnostics to stderr. | `done` | `optimize` and `cluster` fully wired. `evaluate` and `predict` remain stubs (depend on #5). `TuningArgs` flattened into both commands. Rayon `--threads` flag. |
-| 12 | **Model serialization** | Save/load trained RF models in a Rust-native format. | `pending` | Depends on #5 — format determined by RF implementation choice. |
+| 11 | **CLI** | Subcommand-based interface (`optimize`, `cluster`, `evaluate`, `predict`). JSON to stdout, diagnostics to stderr. | `done` | All four subcommands fully wired. `TuningArgs` flattened into `optimize` and `cluster`. Rayon `--threads` flag. `evaluate` trains + CV + saves model. `predict` loads model + batch inference + top-k output. |
+| 12 | **Model serialization** | Save/load trained RF models in a Rust-native format. | `done` | Bincode binary format with versioned envelope (`FORMAT_VERSION = 1`). `forest.save(path)` / `RandomForest::load(path)`. Round-trip tested. |
 
-### Open Design Questions
+### Design Questions (all resolved)
 
-| Question | Options | Status |
-|---|---|---|
-| RF implementation | Hand-roll / `smartcore` / `linfa-ensemble` / hybrid | **Deferred** — evaluate after clustering works |
-| Input time series format | CSV / NPY / Parquet / custom binary | **Resolved** — CSV (`basin_id,t0,...,tn`) |
-| Input attributes format | CSV / Parquet | **Open** — depends on RF implementation |
-| Centroid output format | Same as input / JSON / CSV | **Resolved** — JSON (embedded in cluster result artifact) |
-| Model binary format | Custom / bincode / messagepack | **Open** — depends on RF choice |
+| Question | Resolution |
+|---|---|
+| RF implementation | **Hand-rolled** — parallel Gini-based decision trees with bootstrap sampling |
+| Input time series format | **CSV** — `basin_id,t0,...,tn` |
+| Input attributes format | **CSV** — row per basin, columns are features |
+| Centroid output format | **JSON** — embedded in cluster result artifact |
+| Model binary format | **Bincode** — versioned envelope (`FORMAT_VERSION = 1`), fast and compact |
 
 ---
 
