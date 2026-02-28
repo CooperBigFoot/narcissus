@@ -1,5 +1,6 @@
 use rand::Rng;
 
+use crate::histogram::{FeatureBins, find_histogram_split};
 use crate::node::{FeatureIndex, Impurity};
 
 /// Criterion for measuring the quality of a split.
@@ -356,7 +357,7 @@ pub(crate) fn find_extra_trees_split(
 /// Routes to [`find_best_split`] for [`SplitMethod::Exact`],
 /// [`find_extra_trees_split`] for [`SplitMethod::ExtraTrees`],
 /// and falls back to [`find_best_split`] for [`SplitMethod::Histogram`]
-/// (histogram splits are a Phase 5 placeholder).
+/// (use [`find_split_with_bins`] to get the real histogram path).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn find_split(
     features: &[Vec<f64>],
@@ -390,13 +391,56 @@ pub(crate) fn find_split(
             min_samples_leaf,
             rng,
         ),
-        // TODO: Phase 5 will implement histogram splits
         SplitMethod::Histogram { .. } => find_best_split(
             features,
             labels,
             sample_indices,
             n_classes,
             criterion,
+            max_features,
+            min_samples_leaf,
+            rng,
+        ),
+    }
+}
+
+/// Dispatch to the appropriate split-finding strategy, with optional histogram bins.
+///
+/// When `method` is [`SplitMethod::Histogram`] and `bins` is `Some`, uses
+/// histogram-based splitting via [`find_histogram_split`].
+/// Otherwise delegates to [`find_split`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn find_split_with_bins(
+    features: &[Vec<f64>],
+    labels: &[usize],
+    sample_indices: &[usize],
+    n_classes: usize,
+    criterion: &SplitCriterion,
+    method: &SplitMethod,
+    bins: Option<&FeatureBins>,
+    max_features: usize,
+    min_samples_leaf: usize,
+    rng: &mut impl Rng,
+) -> Option<SplitResult> {
+    match (method, bins) {
+        (SplitMethod::Histogram { .. }, Some(b)) => find_histogram_split(
+            features,
+            labels,
+            sample_indices,
+            n_classes,
+            criterion,
+            b,
+            max_features,
+            min_samples_leaf,
+            rng,
+        ),
+        _ => find_split(
+            features,
+            labels,
+            sample_indices,
+            n_classes,
+            criterion,
+            method,
             max_features,
             min_samples_leaf,
             rng,

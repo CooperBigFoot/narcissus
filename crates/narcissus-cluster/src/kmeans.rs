@@ -15,11 +15,11 @@ use narcissus_dtw::{
     BandConstraint, DbaConfig, DistanceMatrix, Dtw, SeriesEnvelope, TimeSeries, TimeSeriesView,
 };
 
-use crate::config::{KMeansConfig, OptimizeConfig};
+use crate::config::{InitStrategy, KMeansConfig, OptimizeConfig};
 use crate::elkan::ElkanBounds;
 use crate::error::ClusterError;
 use crate::inertia::Inertia;
-use crate::init::{kmeans_plus_plus, kmeans_plus_plus_cached};
+use crate::init::{kmeans_parallel_init, kmeans_plus_plus, kmeans_plus_plus_cached};
 use crate::label::ClusterLabel;
 use crate::result::{KMeansResult, KResult, OptimizeResult};
 
@@ -252,11 +252,16 @@ fn run_once(
 
     let dba_config = DbaConfig::new(config.constraint).with_max_iter(config.dba_max_iter);
 
-    // K-means++ initialization.
+    // Centroid initialization.
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let init_indices = match matrix {
-        Some(m) => kmeans_plus_plus_cached(series.len(), config.k, m, &mut rng),
-        None => kmeans_plus_plus(series, config.k, &dtw, &mut rng),
+    let init_indices = match config.init_strategy {
+        InitStrategy::KMeansPlusPlus => match matrix {
+            Some(m) => kmeans_plus_plus_cached(series.len(), config.k, m, &mut rng),
+            None => kmeans_plus_plus(series, config.k, &dtw, &mut rng),
+        },
+        InitStrategy::KMeansParallel { oversample_factor } => {
+            kmeans_parallel_init(series, config.k, oversample_factor, &dtw, &mut rng)
+        }
     };
     let mut centroids: Vec<TimeSeries> =
         init_indices.iter().map(|&i| series[i].clone()).collect();
@@ -504,6 +509,7 @@ pub(crate) fn optimize(
             seed: config.seed,
             dba_max_iter: config.dba_max_iter,
             use_elkan: false,
+            init_strategy: InitStrategy::KMeansPlusPlus,
         };
 
         let km_result = multi_restart(series, &k_config, matrix.as_ref())?;
@@ -528,7 +534,7 @@ mod tests {
     use narcissus_dtw::{BandConstraint, Dtw, SeriesEnvelope, TimeSeries};
 
     use super::{assign, assign_pruned, multi_restart};
-    use crate::config::KMeansConfig;
+    use crate::config::{InitStrategy, KMeansConfig};
 
     /// Nine series in three tight clusters near 0, 5, and 10.
     fn archetype_a() -> Vec<TimeSeries> {
@@ -760,5 +766,54 @@ mod tests {
             r2.inertia.value(),
             "pruned DTW inertia must be deterministic"
         );
+    }
+
+    #[test]
+    fn parallel_init_three_clusters() {
+        // Run multi_restart with KMeansParallel on archetype_a (k=3) and
+        // verify that the clustering produces a correct 3-3-3 partition.
+        let series = archetype_a();
+        let cfg = KMeansConfig::new(3, BandConstraint::Unconstrained)
+            .unwrap()
+            .with_n_init(5)
+            .with_seed(42)
+            .with_init_strategy(InitStrategy::KMeansParallel { oversample_factor: 2.0 });
+
+        let result = multi_restart(&series, &cfg, None).unwrap();
+
+        assert_eq!(result.centroids.len(), 3, "should have 3 centroids");
+        assert_eq!(result.assignments.len(), 9, "should have 9 assignments");
+
+        // Archetype group for each series index.
+        let archetype_group = |idx: usize| -> usize {
+            match idx {
+                0..=2 => 0,
+                3..=5 => 1,
+                6..=8 => 2,
+                _ => panic!("unexpected index {idx}"),
+            }
+        };
+
+        // Each cluster label should map to exactly one archetype group.
+        let mut label_to_archetype: Vec<Option<usize>> = vec![None; 3];
+        for (i, label) in result.assignments.iter().enumerate() {
+            let ag = archetype_group(i);
+            let c = label.index();
+            match label_to_archetype[c] {
+                None => label_to_archetype[c] = Some(ag),
+                Some(prev) => assert_eq!(
+                    prev, ag,
+                    "cluster {c} contains series from different archetype groups"
+                ),
+            }
+        }
+
+        // Each archetype group must appear exactly once in the mapping.
+        let mut seen: Vec<usize> = label_to_archetype
+            .into_iter()
+            .map(|o| o.expect("every cluster must be occupied"))
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2], "each archetype group must form its own cluster");
     }
 }

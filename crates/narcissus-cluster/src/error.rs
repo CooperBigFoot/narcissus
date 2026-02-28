@@ -37,6 +37,25 @@ pub enum ClusterError {
         iteration: usize,
     },
 
+    /// Returned when silhouette is requested with fewer than 2 clusters.
+    #[error("silhouette requires at least 2 clusters, got {n_clusters}")]
+    SingleCluster {
+        /// The number of clusters provided.
+        n_clusters: usize,
+    },
+
+    /// Returned when the requested batch size exceeds the number of series.
+    ///
+    /// Fired by [`MiniBatchConfig::fit`] when `batch_size > n_series`. The caller
+    /// should reduce `batch_size` or use standard K-means instead.
+    #[error("batch_size ({batch_size}) exceeds number of series ({n_series}); reduce batch_size or use KMeansConfig")]
+    BatchTooLarge {
+        /// The batch size that was requested.
+        batch_size: usize,
+        /// The number of series provided.
+        n_series: usize,
+    },
+
     /// Wraps a DBA error encountered during centroid computation.
     #[error("DBA error during centroid update: {0}")]
     Dba(#[from] DbaError),

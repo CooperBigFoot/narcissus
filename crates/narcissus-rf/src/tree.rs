@@ -4,8 +4,9 @@ use tracing::{debug, instrument};
 
 use crate::{
     RfError,
+    histogram::FeatureBins,
     node::{Node, NodeIndex},
-    split::{SplitCriterion, SplitMethod, find_split},
+    split::{SplitCriterion, SplitMethod, find_split_with_bins},
 };
 
 /// Configuration for a single CART decision tree.
@@ -241,6 +242,12 @@ impl DecisionTreeConfig {
             .map(|feat_idx| features.iter().map(|row| row[feat_idx]).collect())
             .collect();
 
+        // Pre-compute histogram bins when using the Histogram split method.
+        let bins: Option<FeatureBins> = match self.split_method {
+            SplitMethod::Histogram { n_bins } => Some(FeatureBins::build(&col_features, n_bins)),
+            _ => None,
+        };
+
         let sample_indices: Vec<usize> = (0..n_samples).collect();
         let mut rng = ChaCha8Rng::seed_from_u64(self.seed);
         let mut arena: Vec<Node> = Vec::new();
@@ -255,6 +262,7 @@ impl DecisionTreeConfig {
             &mut rng,
             &mut arena,
             max_features,
+            bins.as_ref(),
         );
 
         debug!(
@@ -291,6 +299,7 @@ fn build_tree(
     rng: &mut ChaCha8Rng,
     arena: &mut Vec<Node>,
     max_features: usize,
+    bins: Option<&FeatureBins>,
 ) -> NodeIndex {
     let n_samples = sample_indices.len();
 
@@ -334,13 +343,14 @@ fn build_tree(
     }
 
     // Try to find a split.
-    let split_result = find_split(
+    let split_result = find_split_with_bins(
         col_features,
         labels,
         sample_indices,
         n_classes,
         &config.criterion,
         &config.split_method,
+        bins,
         max_features,
         config.min_samples_leaf,
         rng,
@@ -371,6 +381,7 @@ fn build_tree(
         rng,
         arena,
         max_features,
+        bins,
     );
 
     let right_idx = build_tree(
@@ -383,6 +394,7 @@ fn build_tree(
         rng,
         arena,
         max_features,
+        bins,
     );
 
     arena[node_idx] = Node::Split {
@@ -728,6 +740,27 @@ mod tests {
         let labels = vec![0, 0, 0, 1, 1, 1];
         let tree = DecisionTreeConfig::new()
             .with_split_method(SplitMethod::ExtraTrees)
+            .with_seed(42)
+            .fit(&features, &labels)
+            .unwrap();
+        assert_eq!(tree.predict(&[2.0, 0.0]).unwrap(), 0);
+        assert_eq!(tree.predict(&[11.0, 0.0]).unwrap(), 1);
+    }
+
+    #[test]
+    fn histogram_linearly_separable() {
+        // Same dataset as linearly_separable_correct_split, but with Histogram splitting.
+        let features = vec![
+            vec![1.0, 0.0],
+            vec![2.0, 0.0],
+            vec![3.0, 0.0],
+            vec![10.0, 0.0],
+            vec![11.0, 0.0],
+            vec![12.0, 0.0],
+        ];
+        let labels = vec![0, 0, 0, 1, 1, 1];
+        let tree = DecisionTreeConfig::new()
+            .with_split_method(SplitMethod::Histogram { n_bins: 8 })
             .with_seed(42)
             .fit(&features, &labels)
             .unwrap();

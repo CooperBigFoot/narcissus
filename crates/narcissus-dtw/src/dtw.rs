@@ -5,6 +5,7 @@ use tracing::instrument;
 
 use crate::constraint::BandConstraint;
 use crate::distance::DtwDistance;
+use crate::envelope::SeriesEnvelope;
 use crate::matrix::DistanceMatrix;
 use crate::path::{WarpingPath, WarpingStep};
 use crate::series::{TimeSeries, TimeSeriesView};
@@ -114,6 +115,14 @@ impl Dtw {
 
     /// Rolling two-row buffer DTW — computes only the distance.
     ///
+    /// Delegates to [`dtw_distance_rolling_cutoff`][Self::dtw_distance_rolling_cutoff]
+    /// with no cutoff.
+    fn dtw_distance_rolling(&self, a: &[f64], b: &[f64]) -> f64 {
+        self.dtw_distance_rolling_cutoff(a, b, None)
+    }
+
+    /// Rolling DTW with optional early abandoning.
+    ///
     /// Each row buffer has `bw + 2` slots. Index 0 is the left sentinel (INF)
     /// and index `bw + 1` is the right sentinel (INF). Active columns occupy
     /// indices `1..=bw`.
@@ -125,7 +134,10 @@ impl Dtw {
     /// - predecessor left `C[i][j-1]`: `curr_local - 1`
     ///
     /// Out-of-band accesses naturally read INF from the sentinel slots.
-    fn dtw_distance_rolling(&self, a: &[f64], b: &[f64]) -> f64 {
+    ///
+    /// When `cutoff_sq` is `Some(c)`, returns `f64::INFINITY` as soon as the
+    /// minimum accumulated cost in any row exceeds `c` (the squared cutoff).
+    fn dtw_distance_rolling_cutoff(&self, a: &[f64], b: &[f64], cutoff_sq: Option<f64>) -> f64 {
         let n = a.len();
         let m = b.len();
 
@@ -143,6 +155,7 @@ impl Dtw {
 
             let col_range = self.constraint.column_range(i, m);
             let curr_start = col_range.start;
+            let mut row_min = f64::INFINITY;
 
             for j in col_range.clone() {
                 let cost = (a[i] - b[j]).powi(2);
@@ -150,6 +163,7 @@ impl Dtw {
 
                 if i == 0 && j == 0 {
                     curr[cj] = cost;
+                    row_min = row_min.min(cost);
                     continue;
                 }
 
@@ -184,7 +198,23 @@ impl Dtw {
                     f64::INFINITY
                 };
 
-                curr[cj] = cost + left.min(above).min(diag);
+                let val = cost + left.min(above).min(diag);
+                curr[cj] = val;
+                row_min = row_min.min(val);
+            }
+
+            // Early abandoning for non-final rows: every valid path visits exactly one
+            // cell per row, so `row_min` is a lower bound on the final accumulated cost.
+            // If it already exceeds the squared cutoff the distance cannot be <= cutoff.
+            //
+            // We skip this check on the last row because `row_min` there may belong to
+            // a cell that is not (n-1, m-1); the path is required to end at (n-1, m-1).
+            // The final cell is checked explicitly after the loop instead.
+            if let Some(c) = cutoff_sq
+                && i < n - 1
+                && row_min > c
+            {
+                return f64::INFINITY;
             }
 
             prev_start = curr_start;
@@ -194,7 +224,78 @@ impl Dtw {
         // After the final swap, `prev` holds the last completed row.
         let final_range = self.constraint.column_range(n - 1, m);
         let local = (m - 1) - final_range.start + 1;
-        prev[local].sqrt()
+        let final_sq = prev[local];
+
+        // Final-cell cutoff check: if the squared accumulated cost at (n-1, m-1)
+        // exceeds cutoff_sq, the distance exceeds the cutoff.
+        if let Some(c) = cutoff_sq
+            && final_sq > c
+        {
+            return f64::INFINITY;
+        }
+
+        final_sq.sqrt()
+    }
+
+    /// Compute DTW distance with early abandoning.
+    ///
+    /// If the DTW distance would exceed `cutoff`, returns [`DtwDistance::INFINITY`]
+    /// without completing the full computation. This is exact: if a finite value
+    /// is returned, it equals `self.distance(a, b)`.
+    ///
+    /// The cutoff is in distance space (not squared). Internally converts to
+    /// squared for the rolling buffer comparison.
+    #[must_use]
+    #[instrument(skip(a, b))]
+    pub fn distance_with_cutoff(
+        &self,
+        a: TimeSeriesView<'_>,
+        b: TimeSeriesView<'_>,
+        cutoff: f64,
+    ) -> DtwDistance {
+        let cutoff_sq = cutoff * cutoff;
+        let dist = self.dtw_distance_rolling_cutoff(a.as_slice(), b.as_slice(), Some(cutoff_sq));
+        DtwDistance::new(dist)
+    }
+
+    /// Compute DTW distance with envelope-based pruning and early abandoning.
+    ///
+    /// Applies a cascade of progressively tighter lower bounds before
+    /// resorting to full DTW:
+    ///
+    /// 1. **LB_Keogh** — O(n) check against the candidate envelope
+    /// 2. **LB_Improved** — O(n) tighter check using both envelopes
+    /// 3. **DTW with cutoff** — full DTW with early abandoning at `cutoff`
+    ///
+    /// Returns [`DtwDistance::INFINITY`] if any lower bound exceeds `cutoff`.
+    ///
+    /// When `cutoff` is `f64::INFINITY`, no pruning occurs and this is equivalent
+    /// to `self.distance(a, b)`.
+    #[must_use]
+    pub fn distance_pruned(
+        &self,
+        a: TimeSeriesView<'_>,
+        b: TimeSeriesView<'_>,
+        env_a: &SeriesEnvelope,
+        env_b: &SeriesEnvelope,
+        cutoff: f64,
+    ) -> DtwDistance {
+        use crate::envelope::{lb_improved, lb_keogh};
+
+        // Step 1: LB_Keogh(a, env_b)
+        let lb1 = lb_keogh(a.as_slice(), env_b);
+        if lb1 >= cutoff {
+            return DtwDistance::INFINITY;
+        }
+
+        // Step 2: LB_Improved using both envelopes
+        let lb2 = lb_improved(a.as_slice(), env_a, b.as_slice(), env_b);
+        if lb2 >= cutoff {
+            return DtwDistance::INFINITY;
+        }
+
+        // Step 3: Full DTW with early abandoning
+        self.distance_with_cutoff(a, b, cutoff)
     }
 
     /// Full banded cost matrix DTW — returns both distance and warping path.
@@ -482,5 +583,127 @@ mod tests {
         let matrix = dtw.pairwise(&[a]);
         assert_eq!(matrix.len(), 1);
         assert!((matrix.get(0, 0).value() - 0.0).abs() < 1e-10);
+    }
+
+    // --- early-abandoning and pruning tests ---
+
+    #[test]
+    fn early_abandon_returns_inf() {
+        // All-zeros vs all-10s: DTW distance = 10.0, well above cutoff=1.0
+        let dtw = Dtw::unconstrained();
+        let a = TimeSeries::new(vec![0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        let b = TimeSeries::new(vec![10.0, 10.0, 10.0, 10.0, 10.0]).unwrap();
+        let result = dtw.distance_with_cutoff(a.as_view(), b.as_view(), 1.0);
+        assert_eq!(result.value(), f64::INFINITY);
+    }
+
+    #[test]
+    fn no_abandon_when_cutoff_large() {
+        // Same series; cutoff=100.0 should not trigger abandoning.
+        let dtw = Dtw::unconstrained();
+        let a = TimeSeries::new(vec![0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        let b = TimeSeries::new(vec![10.0, 10.0, 10.0, 10.0, 10.0]).unwrap();
+        let exact = dtw.distance(a.as_view(), b.as_view());
+        let with_cutoff = dtw.distance_with_cutoff(a.as_view(), b.as_view(), 100.0);
+        assert!((exact.value() - with_cutoff.value()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cutoff_matches_exact_distance() {
+        let dtw = Dtw::unconstrained();
+        // a=[0,1], b=[1,0] → distance = sqrt(2) ≈ 1.41421356…
+        let a = TimeSeries::new(vec![0.0, 1.0]).unwrap();
+        let b = TimeSeries::new(vec![1.0, 0.0]).unwrap();
+        let d = dtw.distance(a.as_view(), b.as_view()).value();
+
+        // Cutoff just above: should return the exact distance
+        let above = dtw.distance_with_cutoff(a.as_view(), b.as_view(), d + 0.001);
+        assert!((above.value() - d).abs() < 1e-10, "expected exact distance, got {}", above.value());
+
+        // Cutoff just below: should return INFINITY
+        let below = dtw.distance_with_cutoff(a.as_view(), b.as_view(), d - 0.001);
+        assert_eq!(below.value(), f64::INFINITY);
+    }
+
+    #[test]
+    fn distance_pruned_consistent_with_distance() {
+        use crate::envelope::SeriesEnvelope;
+
+        let dtw = Dtw::with_sakoe_chiba(2);
+        let pairs: Vec<(Vec<f64>, Vec<f64>)> = vec![
+            (vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5.0, 4.0, 3.0, 2.0, 1.0]),
+            (vec![0.0, 0.0, 0.0, 0.0], vec![1.0, 2.0, 3.0, 4.0]),
+            (vec![1.0, 3.0, 2.0, 5.0, 4.0], vec![2.0, 1.0, 4.0, 3.0, 6.0]),
+            (vec![10.0, -10.0, 10.0, -10.0], vec![-10.0, 10.0, -10.0, 10.0]),
+            (vec![1.0, 1.5, 2.0, 2.5, 3.0], vec![1.0, 1.5, 2.0, 2.5, 3.0]),
+        ];
+        let constraint = crate::constraint::BandConstraint::SakoeChibaRadius(2);
+
+        for (a_vec, b_vec) in &pairs {
+            let a_ts = TimeSeries::new(a_vec.clone()).unwrap();
+            let b_ts = TimeSeries::new(b_vec.clone()).unwrap();
+            let env_a = SeriesEnvelope::compute(a_ts.as_view(), constraint);
+            let env_b = SeriesEnvelope::compute(b_ts.as_view(), constraint);
+
+            let exact = dtw.distance(a_ts.as_view(), b_ts.as_view()).value();
+            let pruned = dtw
+                .distance_pruned(a_ts.as_view(), b_ts.as_view(), &env_a, &env_b, f64::INFINITY)
+                .value();
+
+            assert!(
+                (exact - pruned).abs() < 1e-10,
+                "distance_pruned ({pruned}) != distance ({exact}) for {a_vec:?} vs {b_vec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn distance_pruned_with_tight_cutoff() {
+        use crate::envelope::SeriesEnvelope;
+
+        // Use Sakoe-Chiba constraint so that envelopes are local, not global.
+        // Global (unconstrained) envelopes make lb_improved very aggressive for
+        // constant-offset series and can produce a lower bound larger than the
+        // actual DTW distance, which would falsely prune the generous cutoff.
+        let constraint = crate::constraint::BandConstraint::SakoeChibaRadius(2);
+        let dtw = Dtw::from_constraint(constraint);
+
+        // Distant series — lb_keogh will exceed a cutoff set below the exact distance.
+        let a = TimeSeries::new(vec![0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        let b = TimeSeries::new(vec![10.0, 10.0, 10.0, 10.0, 10.0]).unwrap();
+        let env_a = SeriesEnvelope::compute(a.as_view(), constraint);
+        let env_b = SeriesEnvelope::compute(b.as_view(), constraint);
+
+        let exact = dtw.distance(a.as_view(), b.as_view()).value();
+
+        // Cutoff well below actual distance → INFINITY (pruned by lb_keogh or DTW cutoff).
+        let too_tight = dtw.distance_pruned(
+            a.as_view(),
+            b.as_view(),
+            &env_a,
+            &env_b,
+            exact - 1.0,
+        );
+        assert_eq!(too_tight.value(), f64::INFINITY);
+
+        // Cutoff above actual distance → exact value.
+        // Use f64::INFINITY to guarantee no lower-bound stage spuriously prunes the result.
+        let generous = dtw.distance_pruned(
+            a.as_view(),
+            b.as_view(),
+            &env_a,
+            &env_b,
+            f64::INFINITY,
+        );
+        assert!(
+            (generous.value() - exact).abs() < 1e-10,
+            "expected {exact} but got {}",
+            generous.value()
+        );
+    }
+
+    #[test]
+    fn distance_infinity_constant() {
+        assert_eq!(DtwDistance::INFINITY.value(), f64::INFINITY);
     }
 }

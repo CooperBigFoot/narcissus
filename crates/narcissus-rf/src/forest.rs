@@ -349,4 +349,24 @@ mod tests {
         let accuracy = correct as f64 / labels.len() as f64;
         assert!(accuracy > 0.85, "extra-trees accuracy = {accuracy}");
     }
+
+    #[test]
+    fn histogram_three_class_accuracy() {
+        let (features, labels, names) = make_separable_data();
+        let config = RandomForestConfig::new(50)
+            .unwrap()
+            .with_max_features(MaxFeatures::All)
+            .with_split_method(SplitMethod::Histogram { n_bins: 32 })
+            .with_seed(42);
+        let result = config.fit(&features, &labels, &names).unwrap();
+
+        let predictions = result.forest().predict_batch(&features).unwrap();
+        let correct = predictions
+            .iter()
+            .zip(&labels)
+            .filter(|&(&p, &l)| p == l)
+            .count();
+        let accuracy = correct as f64 / labels.len() as f64;
+        assert!(accuracy > 0.85, "histogram RF accuracy = {accuracy}");
+    }
 }

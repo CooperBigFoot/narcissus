@@ -9,6 +9,7 @@ mod confusion;
 mod error;
 mod eval;
 mod forest;
+mod histogram;
 mod importance;
 mod node;
 mod oob;

@@ -10,10 +10,11 @@ mod inertia;
 mod init;
 mod kmeans;
 mod label;
+mod minibatch;
 mod result;
 mod silhouette;
 
-pub use config::{KMeansConfig, OptimizeConfig};
+pub use config::{InitStrategy, KMeansConfig, MiniBatchConfig, OptimizeConfig};
 pub use error::ClusterError;
 pub use inertia::Inertia;
 pub use label::ClusterLabel;

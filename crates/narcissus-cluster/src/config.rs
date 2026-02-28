@@ -5,20 +5,34 @@ use narcissus_dtw::{BandConstraint, TimeSeries};
 use crate::error::ClusterError;
 use crate::result::{KMeansResult, OptimizeResult};
 
+/// Initialization strategy for K-means centroid selection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InitStrategy {
+    /// Standard K-means++ initialization (default).
+    KMeansPlusPlus,
+    /// K-Means‖ (K-Means Parallel) oversampled D²-sampling initialization.
+    /// Runs O(log k) rounds, each sampling `oversample_factor * k` candidates.
+    KMeansParallel {
+        /// Number of candidates per round = oversample_factor * k.
+        oversample_factor: f64,
+    },
+}
+
 /// Configuration for K-means clustering.
 ///
 /// Construct via [`KMeansConfig::new`], then chain `with_*` methods to override defaults.
 ///
 /// # Defaults
 ///
-/// | Parameter      | Default |
-/// |----------------|---------|
-/// | `n_init`       | 10      |
-/// | `max_iter`     | 75      |
-/// | `tol`          | 1e-4    |
-/// | `seed`         | 42      |
-/// | `dba_max_iter` | 10      |
-/// | `use_elkan`    | false   |
+/// | Parameter       | Default                    |
+/// |-----------------|----------------------------|
+/// | `n_init`        | 10                         |
+/// | `max_iter`      | 75                         |
+/// | `tol`           | 1e-4                       |
+/// | `seed`          | 42                         |
+/// | `dba_max_iter`  | 10                         |
+/// | `use_elkan`     | false                      |
+/// | `init_strategy` | `InitStrategy::KMeansPlusPlus` |
 #[derive(Debug, Clone)]
 pub struct KMeansConfig {
     pub(crate) k: usize,
@@ -29,6 +43,7 @@ pub struct KMeansConfig {
     pub(crate) seed: u64,
     pub(crate) dba_max_iter: usize,
     pub(crate) use_elkan: bool,
+    pub(crate) init_strategy: InitStrategy,
 }
 
 impl KMeansConfig {
@@ -52,6 +67,7 @@ impl KMeansConfig {
             seed: 42,
             dba_max_iter: 10,
             use_elkan: false,
+            init_strategy: InitStrategy::KMeansPlusPlus,
         })
     }
 
@@ -104,6 +120,17 @@ impl KMeansConfig {
         self
     }
 
+    /// Set the centroid initialization strategy.
+    ///
+    /// Defaults to [`InitStrategy::KMeansPlusPlus`]. Use
+    /// [`InitStrategy::KMeansParallel`] for faster initialization on large
+    /// datasets by oversampling candidates in O(log k) parallel rounds.
+    #[must_use]
+    pub fn with_init_strategy(mut self, init_strategy: InitStrategy) -> Self {
+        self.init_strategy = init_strategy;
+        self
+    }
+
     /// Return the number of clusters.
     #[must_use]
     pub fn k(&self) -> usize {
@@ -150,6 +177,12 @@ impl KMeansConfig {
     #[must_use]
     pub fn use_elkan(&self) -> bool {
         self.use_elkan
+    }
+
+    /// Return the centroid initialization strategy.
+    #[must_use]
+    pub fn init_strategy(&self) -> InitStrategy {
+        self.init_strategy
     }
 
     /// Cluster `series` using this configuration.
@@ -349,11 +382,161 @@ impl OptimizeConfig {
     }
 }
 
+// ── MiniBatchConfig ───────────────────────────────────────────────────────────
+
+/// Configuration for mini-batch K-means clustering.
+///
+/// Mini-batch K-means samples a random subset of the data at each iteration,
+/// performs a standard assign step on the batch, and updates centroids with
+/// a decaying learning rate. A final full-pass assignment is performed at
+/// the end for accurate labels and inertia.
+///
+/// # Defaults
+///
+/// | Parameter    | Default |
+/// |--------------|---------|
+/// | `batch_size` | 256     |
+/// | `n_init`     | 3       |
+/// | `max_iter`   | 200     |
+/// | `tol`        | 1e-4    |
+/// | `seed`       | 42      |
+#[derive(Debug, Clone)]
+pub struct MiniBatchConfig {
+    pub(crate) k: usize,
+    pub(crate) constraint: BandConstraint,
+    pub(crate) batch_size: usize,
+    pub(crate) n_init: usize,
+    pub(crate) max_iter: usize,
+    pub(crate) tol: f64,
+    pub(crate) seed: u64,
+}
+
+impl MiniBatchConfig {
+    /// Create a new mini-batch K-means configuration with the given cluster count
+    /// and band constraint.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | [`ClusterError::InvalidK`] | `k` is zero |
+    pub fn new(k: usize, constraint: BandConstraint) -> Result<Self, ClusterError> {
+        if k == 0 {
+            return Err(ClusterError::InvalidK { k });
+        }
+        Ok(Self {
+            k,
+            constraint,
+            batch_size: 256,
+            n_init: 3,
+            max_iter: 200,
+            tol: 1e-4,
+            seed: 42,
+        })
+    }
+
+    /// Set the mini-batch size. Larger batches give more stable centroid
+    /// updates but reduce the speed advantage over full-batch K-means.
+    #[must_use]
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    /// Set the number of independent restarts. Higher values reduce the risk of
+    /// converging to a poor local minimum.
+    #[must_use]
+    pub fn with_n_init(mut self, n_init: usize) -> Self {
+        self.n_init = n_init;
+        self
+    }
+
+    /// Set the maximum number of mini-batch iterations per restart.
+    #[must_use]
+    pub fn with_max_iter(mut self, max_iter: usize) -> Self {
+        self.max_iter = max_iter;
+        self
+    }
+
+    /// Set the convergence tolerance. Iteration stops when the total centroid
+    /// shift across a mini-batch falls below this threshold.
+    #[must_use]
+    pub fn with_tol(mut self, tol: f64) -> Self {
+        self.tol = tol;
+        self
+    }
+
+    /// Set the random seed used for K-means++ initialization, batch sampling,
+    /// and restart shuffling.
+    #[must_use]
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Return the number of clusters.
+    #[must_use]
+    pub fn k(&self) -> usize {
+        self.k
+    }
+
+    /// Return the band constraint used for DTW distance computation.
+    #[must_use]
+    pub fn constraint(&self) -> BandConstraint {
+        self.constraint
+    }
+
+    /// Return the mini-batch size.
+    #[must_use]
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    /// Return the number of independent restarts.
+    #[must_use]
+    pub fn n_init(&self) -> usize {
+        self.n_init
+    }
+
+    /// Return the maximum number of mini-batch iterations per restart.
+    #[must_use]
+    pub fn max_iter(&self) -> usize {
+        self.max_iter
+    }
+
+    /// Return the convergence tolerance.
+    #[must_use]
+    pub fn tol(&self) -> f64 {
+        self.tol
+    }
+
+    /// Return the random seed.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Cluster `series` using this mini-batch configuration.
+    ///
+    /// # Errors
+    ///
+    /// | Variant | Condition |
+    /// |---|---|
+    /// | [`ClusterError::TooFewSeries`] | `series.len() < k` |
+    pub fn fit(&self, series: &[TimeSeries]) -> Result<KMeansResult, ClusterError> {
+        let n = series.len();
+        if n < self.k {
+            return Err(ClusterError::TooFewSeries { n_series: n, k: self.k });
+        }
+        crate::minibatch::multi_restart_minibatch(series, self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use narcissus_dtw::BandConstraint;
 
-    use super::{KMeansConfig, OptimizeConfig};
+    use super::{InitStrategy, KMeansConfig, MiniBatchConfig, OptimizeConfig};
     use crate::error::ClusterError;
 
     #[test]
@@ -426,6 +609,35 @@ mod tests {
         assert!(
             cfg.precompute_matrix(),
             "precompute_matrix should default to true"
+        );
+    }
+
+    #[test]
+    fn init_strategy_default_kpp() {
+        let cfg = KMeansConfig::new(3, BandConstraint::Unconstrained).unwrap();
+        assert_eq!(
+            cfg.init_strategy(),
+            InitStrategy::KMeansPlusPlus,
+            "default init_strategy should be KMeansPlusPlus"
+        );
+    }
+
+    #[test]
+    fn minibatch_defaults() {
+        let cfg = MiniBatchConfig::new(3, BandConstraint::Unconstrained).unwrap();
+        assert_eq!(cfg.batch_size(), 256, "default batch_size should be 256");
+        assert_eq!(cfg.n_init(), 3, "default n_init should be 3");
+        assert_eq!(cfg.max_iter(), 200, "default max_iter should be 200");
+        assert!((cfg.tol() - 1e-4).abs() < f64::EPSILON, "default tol should be 1e-4");
+        assert_eq!(cfg.seed(), 42, "default seed should be 42");
+    }
+
+    #[test]
+    fn minibatch_k_zero() {
+        let result = MiniBatchConfig::new(0, BandConstraint::Unconstrained);
+        assert!(
+            matches!(result, Err(ClusterError::InvalidK { k: 0 })),
+            "k=0 should return InvalidK error"
         );
     }
 }

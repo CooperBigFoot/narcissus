@@ -8,6 +8,9 @@ use std::fmt;
 pub struct DtwDistance(f64);
 
 impl DtwDistance {
+    /// Infinite DTW distance, used as a sentinel when early abandoning.
+    pub const INFINITY: Self = Self(f64::INFINITY);
+
     /// Create a new DTW distance from a raw value.
     pub(crate) fn new(value: f64) -> Self {
         Self(value)

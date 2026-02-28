@@ -5,10 +5,10 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use tracing::info;
 
-use narcissus_cluster::{KMeansConfig, OptimizeConfig};
+use narcissus_cluster::{compute_silhouette, InitStrategy, KMeansConfig, OptimizeConfig};
 use narcissus_dtw::BandConstraint;
 use narcissus_io::{align, AttributeReader, ExperimentName, ResultWriter, TimeSeriesReader};
-use narcissus_rf::{CrossValidation, OobMode, RandomForest, RandomForestConfig};
+use narcissus_rf::{CrossValidation, OobMode, RandomForest, RandomForestConfig, SplitMethod};
 
 #[derive(Parser)]
 #[command(name = "narcissus")]
@@ -53,6 +53,34 @@ struct TuningArgs {
     /// Convergence tolerance for inertia change
     #[arg(long, default_value_t = 1e-4)]
     tol: f64,
+
+    /// Z-normalize time series before DTW computation
+    #[arg(long, default_value_t = false)]
+    normalize: bool,
+
+    /// Use derivative DTW (Keogh-Pazzani first derivative)
+    #[arg(long, default_value_t = false)]
+    derivative: bool,
+
+    /// DBA initialization strategy: "mean" or "medoid"
+    #[arg(long, default_value = "mean")]
+    dba_init: String,
+
+    /// Fraction of cluster members to sample per DBA iteration (1.0 = full DBA)
+    #[arg(long, default_value_t = 1.0)]
+    dba_sample_fraction: f64,
+
+    /// Centroid averaging method: "dba" or "ssg"
+    #[arg(long, default_value = "dba")]
+    centroid_method: String,
+
+    /// Use Elkan's triangle inequality acceleration for K-means
+    #[arg(long, default_value_t = false)]
+    elkan: bool,
+
+    /// Initialization strategy: "kpp" (K-Means++) or "parallel" (K-Means‖)
+    #[arg(long, default_value = "kpp")]
+    init_strategy: String,
 }
 
 #[derive(Subcommand)]
@@ -78,6 +106,10 @@ enum Command {
         /// Output directory for result files
         #[arg(long, default_value = ".")]
         output_dir: PathBuf,
+
+        /// Compute silhouette scores alongside inertia
+        #[arg(long, default_value_t = false)]
+        silhouette: bool,
 
         #[command(flatten)]
         tuning: TuningArgs,
@@ -138,6 +170,10 @@ enum Command {
         /// Maximum tree depth (unlimited if not set)
         #[arg(long)]
         max_depth: Option<usize>,
+
+        /// Split-finding strategy: "exact", "extra-trees", or "histogram"
+        #[arg(long, default_value = "exact")]
+        split_method: String,
 
         #[command(flatten)]
         tuning: TuningArgs,
@@ -222,6 +258,44 @@ fn build_constraint(warping_window: usize) -> BandConstraint {
     }
 }
 
+fn preprocess_series(
+    series: Vec<narcissus_dtw::TimeSeries>,
+    normalize: bool,
+    use_derivative: bool,
+) -> Result<Vec<narcissus_dtw::TimeSeries>> {
+    let mut result = series;
+    if normalize {
+        result = narcissus_dtw::z_normalize_batch(&result)
+            .context("z-normalization failed")?;
+        info!(n = result.len(), "z-normalized series");
+    }
+    if use_derivative {
+        result = result
+            .into_iter()
+            .map(|s| narcissus_dtw::derivative(&s).context("derivative computation failed"))
+            .collect::<Result<Vec<_>>>()?;
+        info!(n = result.len(), "computed derivative series");
+    }
+    Ok(result)
+}
+
+fn parse_split_method(s: &str) -> Result<SplitMethod> {
+    match s {
+        "exact" => Ok(SplitMethod::Exact),
+        "extra-trees" => Ok(SplitMethod::ExtraTrees),
+        "histogram" => Ok(SplitMethod::Histogram { n_bins: 256 }),
+        other => anyhow::bail!("unknown split method: {other} (expected exact, extra-trees, or histogram)"),
+    }
+}
+
+fn parse_init_strategy(s: &str) -> Result<InitStrategy> {
+    match s {
+        "kpp" => Ok(InitStrategy::KMeansPlusPlus),
+        "parallel" => Ok(InitStrategy::KMeansParallel { oversample_factor: 2.0 }),
+        other => anyhow::bail!("unknown init strategy: {other} (expected kpp or parallel)"),
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -252,6 +326,7 @@ fn main() -> Result<()> {
             max_k,
             experiment,
             output_dir,
+            silhouette,
             tuning,
         } => {
             let constraint = build_constraint(tuning.warping_window);
@@ -263,6 +338,9 @@ fn main() -> Result<()> {
                 .context("failed to read input CSV")?;
             info!(n_basins = dataset.series.len(), "dataset loaded");
 
+            // Preprocess series
+            let series = preprocess_series(dataset.series, tuning.normalize, tuning.derivative)?;
+
             // Build and run optimize
             let config = OptimizeConfig::new(min_k, max_k, constraint)?
                 .with_n_init(tuning.n_init)
@@ -271,17 +349,41 @@ fn main() -> Result<()> {
                 .with_seed(cli.seed);
 
             let result = config
-                .fit(&dataset.series)
+                .fit(&series)
                 .context("optimization failed")?;
+
+            // Optionally compute silhouette for the best k
+            if silhouette
+                && let Some(best_k_val) = result.best_k()
+            {
+                    let cluster_config = KMeansConfig::new(best_k_val, constraint)?
+                        .with_n_init(tuning.n_init)
+                        .with_max_iter(tuning.max_iter)
+                        .with_tol(tuning.tol)
+                        .with_seed(cli.seed);
+                    let cluster_result = cluster_config.fit(&series)?;
+                    let dtw = if tuning.warping_window == 0 {
+                        narcissus_dtw::Dtw::unconstrained()
+                    } else {
+                        narcissus_dtw::Dtw::with_sakoe_chiba(tuning.warping_window)
+                    };
+                    let sil = compute_silhouette(
+                        &series,
+                        &cluster_result.assignments,
+                        best_k_val,
+                        &dtw,
+                    )?;
+                    info!(silhouette_score = sil.mean_score, "silhouette computed");
+            }
 
             // Write JSON artifact
             let writer = ResultWriter::new(&output_dir, experiment_name)?;
-            writer.write_optimize(dataset.series.len(), &result)?;
+            writer.write_optimize(series.len(), &result)?;
 
             // Build and print stdout summary
             let output = OptimizeOutput {
                 experiment,
-                n_basins: dataset.series.len(),
+                n_basins: series.len(),
                 best_k: result.best_k(),
                 results: result
                     .results
@@ -311,27 +413,37 @@ fn main() -> Result<()> {
                 .context("failed to read input CSV")?;
             info!(n_basins = dataset.series.len(), "dataset loaded");
 
+            let basin_ids = dataset.basin_ids;
+
+            // Preprocess series
+            let series = preprocess_series(dataset.series, tuning.normalize, tuning.derivative)?;
+
+            // Parse init strategy
+            let init_strategy = parse_init_strategy(&tuning.init_strategy)?;
+
             // Build and run clustering
             let config = KMeansConfig::new(k, constraint)?
                 .with_n_init(tuning.n_init)
                 .with_max_iter(tuning.max_iter)
                 .with_tol(tuning.tol)
-                .with_seed(cli.seed);
+                .with_seed(cli.seed)
+                .with_use_elkan(tuning.elkan)
+                .with_init_strategy(init_strategy);
 
             let result = config
-                .fit(&dataset.series)
+                .fit(&series)
                 .context("clustering failed")?;
 
             // Write JSON artifact
             let writer = ResultWriter::new(&output_dir, experiment_name)?;
-            writer.write_cluster(&dataset.basin_ids, &result)?;
+            writer.write_cluster(&basin_ids, &result)?;
 
             // Build and print stdout summary
             let output = ClusterOutput {
                 experiment,
                 k: result.centroids.len(),
                 inertia: result.inertia.value(),
-                n_basins: dataset.series.len(),
+                n_basins: series.len(),
                 converged: result.converged,
                 cluster_sizes: result.cluster_sizes(),
             };
@@ -347,28 +459,38 @@ fn main() -> Result<()> {
             cv_folds,
             n_trees,
             max_depth,
+            split_method,
             tuning,
         } => {
             let constraint = build_constraint(tuning.warping_window);
             let experiment_name = ExperimentName::new(experiment.clone())?;
 
-            // 1. Read time series and cluster
+            // 1. Read time series and preprocess
             let dataset = TimeSeriesReader::new(&data)
                 .read()
                 .context("failed to read time series CSV")?;
             info!(n_basins = dataset.series.len(), "time series loaded");
 
+            let basin_ids = dataset.basin_ids;
+            let series = preprocess_series(dataset.series, tuning.normalize, tuning.derivative)?;
+
+            // Parse init strategy
+            let init_strategy = parse_init_strategy(&tuning.init_strategy)?;
+
+            // 2. Cluster
             let cluster_config = KMeansConfig::new(k, constraint)?
                 .with_n_init(tuning.n_init)
                 .with_max_iter(tuning.max_iter)
                 .with_tol(tuning.tol)
-                .with_seed(cli.seed);
+                .with_seed(cli.seed)
+                .with_use_elkan(tuning.elkan)
+                .with_init_strategy(init_strategy);
             let cluster_result = cluster_config
-                .fit(&dataset.series)
+                .fit(&series)
                 .context("clustering failed")?;
             info!(k, inertia = cluster_result.inertia.value(), "clustering complete");
 
-            // 2. Read attributes and align
+            // 3. Read attributes and align
             let attr_dataset = AttributeReader::new(&attributes)
                 .read()
                 .context("failed to read attributes CSV")?;
@@ -379,14 +501,16 @@ fn main() -> Result<()> {
                 .map(|l| l.index())
                 .collect();
 
-            let aligned = align(&dataset.basin_ids, &cluster_labels, &attr_dataset)
+            let aligned = align(&basin_ids, &cluster_labels, &attr_dataset)
                 .context("failed to align attributes with cluster assignments")?;
             info!(n_aligned = aligned.n_samples(), "alignment complete");
 
-            // 3. Cross-validate
+            // 4. Cross-validate
             let feature_names: Vec<String> = aligned.feature_names().to_vec();
+            let split_method_parsed = parse_split_method(&split_method)?;
             let rf_config = RandomForestConfig::new(n_trees)?
                 .with_max_depth(max_depth)
+                .with_split_method(split_method_parsed)
                 .with_seed(cli.seed);
 
             let cv = CrossValidation::new(cv_folds)?
@@ -400,9 +524,10 @@ fn main() -> Result<()> {
                 "cross-validation complete"
             );
 
-            // 4. Train final model on all data with OOB
+            // 5. Train final model on all data with OOB
             let final_config = RandomForestConfig::new(n_trees)?
                 .with_max_depth(max_depth)
+                .with_split_method(split_method_parsed)
                 .with_oob_mode(OobMode::Enabled)
                 .with_seed(cli.seed);
             let train_result = final_config
@@ -412,7 +537,7 @@ fn main() -> Result<()> {
             let oob_accuracy = train_result.oob_score().map(|s| s.accuracy);
             info!(oob_accuracy = ?oob_accuracy, "final model trained");
 
-            // 5. Save model
+            // 6. Save model
             let writer = ResultWriter::new(&output_dir, experiment_name)?;
             train_result
                 .forest()
@@ -420,7 +545,7 @@ fn main() -> Result<()> {
                 .context("failed to save model")?;
             info!(path = %writer.model_path().display(), "model saved");
 
-            // 6. Write evaluation JSON
+            // 7. Write evaluation JSON
             let importances: Vec<f64> = cv_result.feature_importances.iter().map(|f| f.importance).collect();
             let ranks: Vec<usize> = cv_result.feature_importances.iter().map(|f| f.rank).collect();
             let imp_names: Vec<String> = cv_result.feature_importances.iter().map(|f| f.name.clone()).collect();
@@ -444,10 +569,10 @@ fn main() -> Result<()> {
                 &class_metrics,
             )?;
 
-            // 7. Write cluster JSON
-            writer.write_cluster(&dataset.basin_ids, &cluster_result)?;
+            // 8. Write cluster JSON
+            writer.write_cluster(&basin_ids, &cluster_result)?;
 
-            // 8. Print summary
+            // 9. Print summary
             let output = EvaluateOutput {
                 experiment,
                 n_basins: aligned.n_samples(),
